@@ -1,15 +1,17 @@
 {
   "name": "wav2mid-high-quality",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "scripts": {
     "prepare-runtime": "node scripts/copy-runtime.mjs",
     "dev": "npm run prepare-runtime && vite",
-    "build": "npm run prepare-runtime && vite build && node scripts/check-static-assets.mjs",
+    "build": "npm run prepare-runtime && vite build && node scripts/check-static-assets.mjs --limit-mib=25",
     "preview": "vite preview",
     "test:e2e": "playwright test",
-    "deploy": "npm run build && wrangler deploy"
+    "check:temporary-assets": "node scripts/check-static-assets.mjs --limit-mib=5",
+    "deploy": "npm run build && wrangler deploy",
+    "deploy:temporary": "npm run build && npm run check:temporary-assets && wrangler deploy --temporary"
   },
   "dependencies": {
     "@spotify/basic-pitch": "1.0.1",
@@ -29,6 +31,6 @@
   "devDependencies": {
     "@playwright/test": "1.62.1",
     "vite": "5.4.14",
-    "wrangler": "4.30.0"
+    "wrangler": "4.121.0"
   }
 }
