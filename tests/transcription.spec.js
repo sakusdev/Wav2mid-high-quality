@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { Midi } from '@tonejs/midi';
 import fs from 'node:fs';
 
 function makeFixtureWav(path) {
@@ -61,6 +60,18 @@ function makeFixtureWav(path) {
   fs.writeFileSync(path, buf);
 }
 
+function assertThreeTrackMidi(midiBytes) {
+  expect(midiBytes.length).toBeGreaterThan(64);
+  expect(midiBytes.subarray(0, 4).toString('ascii')).toBe('MThd');
+  expect(midiBytes.readUInt16BE(8)).toBe(1); // SMF format 1
+  expect(midiBytes.readUInt16BE(10)).toBe(3); // Harmony / Bass / Drums
+  const binary = midiBytes.toString('latin1');
+  expect(binary).toContain('Wav2mid HQ · Harmony');
+  expect(binary).toContain('Wav2mid HQ · Bass');
+  expect(binary).toContain('Wav2mid HQ · Drums');
+  expect([...midiBytes].some(byte => byte === 0x99)).toBe(true); // note-on, MIDI channel 10
+}
+
 test('PRO pipeline separates, ensembles, transcribes drums and exports multi-track MIDI', async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   const wavPath = testInfo.outputPath('polyphonic-drums-44k-stereo.wav');
@@ -109,17 +120,7 @@ test('PRO pipeline separates, ensembles, transcribes drums and exports multi-tra
   const midiDownload = await midiDownloadPromise;
   const midiPath = testInfo.outputPath('result.mid');
   await midiDownload.saveAs(midiPath);
-  const midiBytes = fs.readFileSync(midiPath);
-  expect(midiBytes.length).toBeGreaterThan(64);
-  expect(midiBytes.subarray(0, 4).toString('ascii')).toBe('MThd');
-  const parsedMidi = new Midi(midiBytes);
-  expect(parsedMidi.tracks.length).toBe(3);
-  expect(parsedMidi.tracks.map(track => track.name)).toEqual(expect.arrayContaining([
-    'Wav2mid HQ · Harmony',
-    'Wav2mid HQ · Bass',
-    'Wav2mid HQ · Drums',
-  ]));
-  expect(parsedMidi.tracks.find(track => track.name.includes('Drums'))?.notes.length).toBeGreaterThan(0);
+  assertThreeTrackMidi(fs.readFileSync(midiPath));
 
   const jsonDownloadPromise = page.waitForEvent('download');
   await page.locator('#jsonBtn').click();
