@@ -1,13 +1,19 @@
 import './style.css';
 import { configureBackend, exportJson, exportMidi, midiName, MODES, transcribe } from './transcribe.js';
 
+const MODE_COPY = {
+  fast: '1-pass。最速。source separation / drums / context correctionなし。',
+  pro: '3-pass。STFT分離 + mix/harmonic/bass ensemble + drums + context correction。',
+  insane: '4-pass。PROにpresence specialistを追加。精度優先でかなり重い。',
+};
+
 const app = document.querySelector('#app');
 app.innerHTML = `
   <section class="hero shell">
     <div>
-      <p class="eyebrow">LOCAL AUDIO → MIDI</p>
+      <p class="eyebrow">LOCAL AUDIO → MULTI-TRACK MIDI</p>
       <h1>Wav2mid <span>HQ</span></h1>
-      <p class="lead">音源はアップロードされません。ブラウザ内のTensorFlow.js / WASMで解析し、MIDIまで生成します。</p>
+      <p class="lead">音源はアップロードしません。ブラウザ内でSTFT source separation、複数AMT pass、ensemble、文脈補正、drum推定まで実行します。</p>
     </div>
     <div class="backend-pill"><span class="dot"></span><span id="backendLabel">backend: loading…</span></div>
   </section>
@@ -18,7 +24,7 @@ app.innerHTML = `
         <input id="fileInput" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg" hidden />
         <div class="drop-icon">↥</div>
         <strong>音源をドロップ / 選択</strong>
-        <span>WAV / MP3 / M4A / OGG など、ブラウザが再生できる形式</span>
+        <span>WAV / MP3 / M4A / OGG など、ブラウザがデコードできる形式</span>
       </label>
       <audio id="audioPreview" controls hidden></audio>
       <div id="fileInfo" class="file-info muted">まだ音源がありません</div>
@@ -33,13 +39,15 @@ app.innerHTML = `
           <button data-mode="pro" class="active">PRO</button>
           <button data-mode="insane">INSANE</button>
         </div>
+        <p class="mode-note" id="modeNote">${MODE_COPY.pro}</p>
       </div>
       <div class="setting-row">
         <label for="backendSelect">Compute</label>
         <select id="backendSelect">
-          <option value="auto">Auto</option>
-          <option value="wasm">WASM</option>
+          <option value="auto">Auto (WebGPU → WebGL → WASM)</option>
+          <option value="webgpu">WebGPU</option>
           <option value="webgl">WebGL</option>
+          <option value="wasm">WASM</option>
         </select>
       </div>
       <div class="setting-row slider-row">
@@ -57,7 +65,7 @@ app.innerHTML = `
   <section class="shell panel progress-panel" id="progressPanel" hidden>
     <div class="progress-head"><strong id="progressText">解析準備中…</strong><span id="progressPct">0%</span></div>
     <div class="progress-track"><div id="progressBar"></div></div>
-    <p class="muted small" id="progressHint">初回はモデルの読み込みがあるため時間がかかります。</p>
+    <p class="muted small" id="progressHint">初回はモデル読み込みがあります。PRO/INSANEは複数passなので長尺曲ほど時間がかかります。</p>
   </section>
 
   <section class="shell results" id="results" hidden>
@@ -66,12 +74,19 @@ app.innerHTML = `
       <div class="actions"><button id="jsonBtn" class="secondary">JSON</button><button id="midiBtn" class="primary compact">DOWNLOAD MIDI</button></div>
     </div>
 
-    <div class="stat-grid">
+    <div class="stat-grid extended">
       <div class="stat"><span>NOTES</span><strong id="statNotes">—</strong></div>
+      <div class="stat"><span>DRUMS</span><strong id="statDrums">—</strong></div>
       <div class="stat"><span>TEMPO</span><strong id="statTempo">—</strong></div>
       <div class="stat"><span>KEY</span><strong id="statKey">—</strong></div>
       <div class="stat"><span>MAX POLY</span><strong id="statPoly">—</strong></div>
+      <div class="stat"><span>ENSEMBLE</span><strong id="statEnsemble">—</strong></div>
       <div class="stat"><span>RANGE</span><strong id="statRange">—</strong></div>
+    </div>
+
+    <div class="panel pipeline-panel">
+      <div class="panel-title"><h2>Pipeline</h2><span id="pipelineBackend" class="muted small"></span></div>
+      <div id="pipelineList" class="pipeline-list"></div>
     </div>
 
     <div class="panel roll-panel">
@@ -81,17 +96,17 @@ app.innerHTML = `
 
     <div class="two-col">
       <div class="panel">
-        <div class="panel-title"><h2>Chord timeline</h2><span class="muted small">推定</span></div>
+        <div class="panel-title"><h2>Chord timeline</h2><span class="muted small">context decoder input/output</span></div>
         <div id="chordList" class="chord-list"></div>
       </div>
       <div class="panel">
-        <div class="panel-title"><h2>Cleanup</h2><span class="muted small">post-processing</span></div>
+        <div class="panel-title"><h2>Analysis</h2><span class="muted small">ensemble stats</span></div>
         <div id="cleanupSummary" class="cleanup"></div>
       </div>
     </div>
   </section>
 
-  <footer class="shell">Wav2mid HQ · runs locally in your browser · Apache-2.0 model dependency: Spotify Basic Pitch</footer>
+  <footer class="shell">Wav2mid HQ · client-side STFT + Spotify Basic Pitch · WebGPU/WebGL/WASM · multi-track MIDI</footer>
 `;
 
 const el = id => document.getElementById(id);
@@ -148,7 +163,7 @@ async function handleFile(file) {
     const ctx = new AudioContext();
     audioBuffer = await ctx.decodeAudioData(bytes.slice(0));
     await ctx.close();
-    el('fileInfo').textContent = `${file.name} · ${formatBytes(file.size)} · ${formatTime(audioBuffer.duration)} · ${audioBuffer.sampleRate.toLocaleString()} Hz`;
+    el('fileInfo').textContent = `${file.name} · ${formatBytes(file.size)} · ${formatTime(audioBuffer.duration)} · ${audioBuffer.sampleRate.toLocaleString()} Hz · ${audioBuffer.numberOfChannels}ch`;
     analyzeBtn.disabled = false;
   } catch (error) {
     audioBuffer = null;
@@ -162,6 +177,7 @@ el('qualityGroup').addEventListener('click', event => {
   if (!button) return;
   qualityMode = button.dataset.mode;
   [...el('qualityGroup').querySelectorAll('button')].forEach(b => b.classList.toggle('active', b === button));
+  el('modeNote').textContent = MODE_COPY[qualityMode];
 });
 
 el('backendSelect').addEventListener('change', async event => {
@@ -189,16 +205,24 @@ analyzeBtn.addEventListener('click', async () => {
       sensitivity: Number(el('sensitivity').value),
       minPitch: Number(el('minPitch').value),
       maxPitch: Number(el('maxPitch').value),
-    }, ({ stage, value }) => {
-      const labels = { infer: 'ニューラル解析中…', decode: 'ノートへ変換中…', clean: '倍音・ゴーストを整理中…', done: '完了' };
-      updateProgress(value, labels[stage] ?? '解析中…');
+    }, ({ stage, value, detail }) => {
+      const labels = {
+        prepare: '音源を22.05 kHz monoへ正規化中…',
+        separate: 'harmonic / percussive source separation中…',
+        infer: '複数AMT passを推論中…',
+        ensemble: 'ensemble候補を融合中…',
+        context: 'キー・コード文脈で補正中…',
+        done: '完了',
+      };
+      updateProgress(value, `${labels[stage] ?? '解析中…'}${detail ? ` ${detail}` : ''}`);
     });
     result.elapsedSeconds = (performance.now() - start) / 1000;
+    backendLabel.textContent = `backend: ${String(result.pipeline.backend).toUpperCase()}`;
     renderResult();
   } catch (error) {
     console.error(error);
     updateProgress(0, `解析失敗: ${error?.message ?? error}`);
-    el('progressHint').textContent = '開発者コンソールに詳細を出力しました。別の音源形式やCompute backendも試せます。';
+    el('progressHint').textContent = '開発者コンソールに詳細を出力しました。FASTや別Compute backendでも試せます。';
   } finally {
     analyzeBtn.disabled = false;
   }
@@ -224,23 +248,37 @@ function renderResult() {
   el('results').hidden = false;
   el('resultTitle').textContent = selectedFile.name;
   el('statNotes').textContent = result.stats.noteCount.toLocaleString();
+  el('statDrums').textContent = result.stats.drumCount.toLocaleString();
   el('statTempo').textContent = `${result.tempo} BPM`;
   el('statKey').textContent = result.key;
   el('statPoly').textContent = result.stats.maxPolyphony;
+  el('statEnsemble').textContent = `${Math.round(result.stats.ensembleRatio * 100)}%`;
   el('statRange').textContent = `${midiName(result.stats.lowestNote)} – ${midiName(result.stats.highestNote)}`;
   el('rollLegend').textContent = `${MODES[qualityMode].label} · ${result.elapsedSeconds.toFixed(1)} sec processing`;
+  el('pipelineBackend').textContent = String(result.pipeline.backend).toUpperCase();
 
-  const removed = Math.max(0, result.rawNotes.length - result.notes.length);
+  const pipelineSteps = [
+    result.pipeline.sourceSeparation === 'off' ? 'No source separation' : result.pipeline.sourceSeparation,
+    `${result.pipeline.stemPasses.join(' + ')} AMT`,
+    result.pipeline.ensemble ? 'confidence ensemble' : 'single-pass',
+    result.pipeline.contextDecoder ? 'key/chord context decoder' : 'context decoder off',
+    result.pipeline.drumTranscription ? 'drum onset classifier' : 'drums off',
+    `${result.pipeline.chunks} chunk${result.pipeline.chunks === 1 ? '' : 's'}`,
+  ];
+  el('pipelineList').innerHTML = pipelineSteps.map(step => `<span class="pipeline-chip">${escapeHtml(step)}</span>`).join('');
+
   el('cleanupSummary').innerHTML = `
-    <div><span>Raw notes</span><strong>${result.rawNotes.length}</strong></div>
-    <div><span>Final notes</span><strong>${result.notes.length}</strong></div>
-    <div><span>Filtered / merged</span><strong>${removed}</strong></div>
-    <div><span>Backend</span><strong>${backendLabel.textContent.replace('backend: ', '')}</strong></div>
+    <div><span>Raw candidates</span><strong>${result.stats.candidateCount.toLocaleString()}</strong></div>
+    <div><span>Final tonal notes</span><strong>${result.stats.noteCount.toLocaleString()}</strong></div>
+    <div><span>Drum events</span><strong>${result.stats.drumCount.toLocaleString()}</strong></div>
+    <div><span>Ensemble-backed</span><strong>${result.stats.ensembleBacked.toLocaleString()}</strong></div>
+    <div><span>Chunks × passes</span><strong>${result.stats.chunks} × ${result.stats.passCount}</strong></div>
+    <div><span>Backend</span><strong>${escapeHtml(String(result.pipeline.backend).toUpperCase())}</strong></div>
   `;
 
   const chordList = el('chordList');
   chordList.innerHTML = result.chords.length
-    ? result.chords.slice(0, 80).map(chord => `
+    ? result.chords.slice(0, 120).map(chord => `
       <div class="chord-row"><span class="time">${formatTime(chord.start)}</span><strong>${escapeHtml(chord.name)}</strong><span>${Math.round(chord.confidence * 100)}%</span></div>
     `).join('')
     : '<p class="muted">明確なコード候補を検出できませんでした。</p>';
@@ -253,8 +291,8 @@ function drawPianoRoll(notes, duration) {
   const canvas = el('pianoRoll');
   const wrap = canvas.parentElement;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const cssWidth = Math.max(wrap.clientWidth, Math.min(5200, 900 + duration * 7));
-  const cssHeight = 420;
+  const cssWidth = Math.max(wrap.clientWidth, Math.min(6200, 900 + duration * 8));
+  const cssHeight = 430;
   canvas.style.width = `${cssWidth}px`;
   canvas.style.height = `${cssHeight}px`;
   canvas.width = Math.floor(cssWidth * dpr);
@@ -290,8 +328,11 @@ function drawPianoRoll(notes, duration) {
     const w = Math.max(1.5, (note.durationSeconds / duration) * cssWidth);
     const y = cssHeight - ((note.pitchMidi - minPitch + 1) / pitchSpan) * cssHeight;
     const h = Math.max(3, cssHeight / pitchSpan - 1);
-    const alpha = 0.42 + note.amplitude * 0.58;
-    ctx.fillStyle = `rgba(235, 239, 255, ${alpha.toFixed(3)})`;
+    const confidence = note.confidence ?? note.amplitude;
+    const alpha = 0.34 + confidence * 0.66;
+    ctx.fillStyle = note.instrument === 'bass'
+      ? `rgba(160, 198, 255, ${alpha.toFixed(3)})`
+      : `rgba(235, 239, 255, ${alpha.toFixed(3)})`;
     ctx.fillRect(x, y + 1, w, h);
   }
 }
