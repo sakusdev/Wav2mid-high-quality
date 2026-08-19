@@ -16,6 +16,8 @@ jobs:
           package-manager-cache: false
       - run: npm install --no-audit --no-fund
       - run: npm run build
+      - name: Cloudflare temporary asset gate
+        run: npm run check:temporary-assets
       - run: google-chrome --version
       - run: npm run test:e2e
       - name: Cloudflare deployment readiness
