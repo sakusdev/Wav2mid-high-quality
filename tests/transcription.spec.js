@@ -21,9 +21,7 @@ function makeFixtureWav(path) {
   const u32 = n => { buf.writeUInt32LE(n, o); o += 4; };
   const u16 = n => { buf.writeUInt16LE(n, o); o += 2; };
   write('RIFF'); u32(36 + dataBytes); write('WAVE');
-  write('fmt '); u32(16); u16(1); u32(sampleRate); u16(channels); // overwritten below for compact fixture setup
-  o = 20;
-  u16(1); u16(channels); u32(sampleRate); u32(sampleRate * channels * 2); u16(channels * 2); u16(16);
+  write('fmt '); u32(16); u16(1); u16(channels); u32(sampleRate); u32(sampleRate * channels * 2); u16(channels * 2); u16(16);
   write('data'); u32(dataBytes);
 
   const tonalEvents = [
@@ -172,8 +170,8 @@ test('PRO pipeline separates, ensembles, meets accuracy gate and exports multi-t
   const tonalScore = scoreTonalNotes(analysis.notes, EXPECTED_TONAL);
   const drumScore = scoreOnsets(analysis.drums, EXPECTED_DRUM_ONSETS);
   console.log('HQ accuracy benchmark:', JSON.stringify({ tonal: tonalScore, drums: drumScore }));
-  expect(tonalScore.recall).toBeGreaterThanOrEqual(0.65);
-  expect(tonalScore.precision).toBeGreaterThanOrEqual(0.30);
-  expect(drumScore.recall).toBeGreaterThanOrEqual(0.50);
+  expect(tonalScore.recall).toBeGreaterThanOrEqual(0.75);
+  expect(tonalScore.precision).toBeGreaterThanOrEqual(0.50);
+  expect(drumScore.recall).toBeGreaterThanOrEqual(0.75);
   expect(browserErrors).toEqual([]);
 });
