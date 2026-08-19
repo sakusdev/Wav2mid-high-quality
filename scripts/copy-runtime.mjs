@@ -1,7 +1,8 @@
 import { cp, mkdir, readdir, copyFile, rm } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = resolve(new URL('..', import.meta.url).pathname, '..');
+const root = fileURLToPath(new URL('..', import.meta.url));
 const publicDir = join(root, 'public');
 const modelSrc = join(root, 'node_modules', '@spotify', 'basic-pitch', 'model');
 const modelDst = join(publicDir, 'model', 'basic-pitch');
