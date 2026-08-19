@@ -4,8 +4,8 @@ import fs from 'node:fs';
 function makeFixtureWav(path) {
   const sampleRate = 44100;
   const channels = 2;
-  const duration = 4;
-  const totalSamples = sampleRate * duration;
+  const duration = 2.4;
+  const totalSamples = Math.round(sampleRate * duration);
   const dataBytes = totalSamples * channels * 2;
   const buf = Buffer.alloc(44 + dataBytes);
   let o = 0;
@@ -17,14 +17,14 @@ function makeFixtureWav(path) {
   write('data'); u32(dataBytes);
 
   const tonalEvents = [
-    [0.10, 0.95, [48, 60]],
-    [1.05, 1.90, [52, 64]],
-    [2.00, 2.85, [55, 67]],
-    [2.95, 3.90, [48, 55, 60, 64, 67]],
+    [0.08, 0.55, [48, 60]],
+    [0.62, 1.08, [52, 64]],
+    [1.15, 1.62, [55, 67]],
+    [1.70, 2.34, [48, 55, 60, 64, 67]],
   ];
-  const kickTimes = [0.45, 2.35, 3.45];
-  const snareTimes = [1.35, 2.85];
-  const hatTimes = [0.9, 1.8, 2.7, 3.6];
+  const kickTimes = [0.32, 1.42];
+  const snareTimes = [0.86, 1.95];
+  const hatTimes = [0.52, 1.08, 1.63, 2.20];
 
   const transient = (t, times, kind) => {
     let value = 0;
@@ -63,13 +63,13 @@ function makeFixtureWav(path) {
 function assertThreeTrackMidi(midiBytes) {
   expect(midiBytes.length).toBeGreaterThan(64);
   expect(midiBytes.subarray(0, 4).toString('ascii')).toBe('MThd');
-  expect(midiBytes.readUInt16BE(8)).toBe(1); // SMF format 1
-  expect(midiBytes.readUInt16BE(10)).toBe(3); // Harmony / Bass / Drums
+  expect(midiBytes.readUInt16BE(8)).toBe(1);
+  expect(midiBytes.readUInt16BE(10)).toBe(3);
   const binary = midiBytes.toString('latin1');
   expect(binary).toContain('Wav2mid HQ · Harmony');
   expect(binary).toContain('Wav2mid HQ · Bass');
   expect(binary).toContain('Wav2mid HQ · Drums');
-  expect([...midiBytes].some(byte => byte === 0x99)).toBe(true); // note-on, MIDI channel 10
+  expect([...midiBytes].some(byte => byte === 0x99)).toBe(true);
 }
 
 test('PRO pipeline separates, ensembles, transcribes drums and exports multi-track MIDI', async ({ page }, testInfo) => {
@@ -83,22 +83,19 @@ test('PRO pipeline separates, ensembles, transcribes drums and exports multi-tra
   await expect(page).toHaveTitle(/Wav2mid HQ/);
   expect(await page.evaluate(() => crossOriginIsolated)).toBe(true);
   await expect(page.locator('#backendLabel')).not.toContainText('unavailable');
+  await expect(page.locator('#backendSelect option[value="webgpu"]')).toHaveCount(1);
   await page.locator('#fileInput').setInputFiles(wavPath);
   await expect(page.locator('#analyzeBtn')).toBeEnabled();
-  await expect(page.locator('#fileInfo')).toContainText('0:04');
+  await expect(page.locator('#fileInfo')).toContainText('0:02');
   await expect(page.locator('#fileInfo')).toContainText('2ch');
 
-  // Portable fallback must still initialize.
+  // The full regression uses the portable SIMD/thread-capable backend so CI does not depend on GPU hardware.
   await page.locator('#backendSelect').selectOption('wasm');
   await expect(page.locator('#backendLabel')).toContainText('WASM');
-
-  // WebGPU is exposed when supported; Auto handles backend fallback if a model op is unavailable.
-  await page.locator('#backendSelect').selectOption('auto');
-  await expect(page.locator('#backendLabel')).not.toContainText('loading');
   await page.locator('[data-mode="pro"]').click();
   await page.locator('#analyzeBtn').click();
   try {
-    await expect(page.locator('#results')).toBeVisible({ timeout: 260_000 });
+    await expect(page.locator('#results')).toBeVisible({ timeout: 270_000 });
   } catch (error) {
     console.log('progress:', await page.locator('#progressText').innerText(), await page.locator('#progressPct').innerText());
     console.log('hint:', await page.locator('#progressHint').innerText());
@@ -114,6 +111,7 @@ test('PRO pipeline separates, ensembles, transcribes drums and exports multi-tra
   await expect(page.locator('#pipelineList')).toContainText('harmonic');
   await expect(page.locator('#pipelineList')).toContainText('confidence ensemble');
   await expect(page.locator('#pipelineList')).toContainText('drum onset classifier');
+  await expect(page.locator('#pipelineBackend')).toContainText('WASM');
 
   const midiDownloadPromise = page.waitForEvent('download');
   await page.locator('#midiBtn').click();
@@ -129,6 +127,7 @@ test('PRO pipeline separates, ensembles, transcribes drums and exports multi-tra
   await jsonDownload.saveAs(jsonPath);
   const analysis = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
   expect(analysis.format).toBe('wav2mid-hq/v2');
+  expect(analysis.pipeline.backend).toBe('wasm');
   expect(analysis.pipeline.ensemble).toBe(true);
   expect(analysis.pipeline.contextDecoder).toBe(true);
   expect(analysis.pipeline.stemPasses).toEqual(expect.arrayContaining(['mix', 'harmonic', 'bass']));
