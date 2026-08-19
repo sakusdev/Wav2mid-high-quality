@@ -18,6 +18,17 @@ jobs:
       - run: npm run build
       - run: google-chrome --version
       - run: npm run test:e2e
+      - name: Cloudflare deployment readiness
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          if [[ -n "$CLOUDFLARE_API_TOKEN" && -n "$CLOUDFLARE_ACCOUNT_ID" ]]; then
+            echo "Cloudflare credentials: configured"
+          else
+            echo "Cloudflare credentials: not configured"
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: dist

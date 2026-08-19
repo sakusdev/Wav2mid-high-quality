@@ -10,6 +10,12 @@
   </head>
   <body>
     <main id="app"></main>
+    <script>
+      // Math.signbit is still missing in some stable browsers; the drum ZCR path only needs the sign test.
+      if (typeof Math.signbit !== 'function') {
+        Math.signbit = value => value < 0 || Object.is(value, -0);
+      }
+    </script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
