@@ -8,6 +8,7 @@
     "dev": "npm run prepare-runtime && vite",
     "build": "npm run prepare-runtime && vite build",
     "preview": "vite preview",
+    "test:e2e": "playwright test",
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
@@ -17,6 +18,7 @@
     "@tonejs/midi": "2.0.28"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "vite": "5.4.14",
     "wrangler": "4.30.0"
   }
