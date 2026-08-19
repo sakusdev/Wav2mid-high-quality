@@ -13,11 +13,16 @@
   },
   "dependencies": {
     "@spotify/basic-pitch": "1.0.1",
-    "@tensorflow/tfjs": "3.21.0",
-    "@tensorflow/tfjs-backend-wasm": "3.21.0",
-    "@tensorflow/tfjs-backend-webgpu": "3.21.0",
+    "@tensorflow/tfjs": "4.21.0",
+    "@tensorflow/tfjs-backend-wasm": "4.21.0",
+    "@tensorflow/tfjs-backend-webgpu": "4.21.0",
     "@tonejs/midi": "2.0.28",
     "fft.js": "4.0.4"
+  },
+  "overrides": {
+    "@spotify/basic-pitch": {
+      "@tensorflow/tfjs": "4.21.0"
+    }
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
