@@ -1,6 +1,8 @@
 import './style.css';
 import { configureBackend, exportJson, exportMidi, midiName, MODES, transcribe } from './transcribe.js';
+import { neuralModelDescription, transcribeNeural } from './neural-transcribe.js';
 
+const NEURAL_MODEL = neuralModelDescription();
 const MODE_COPY = {
   fast: '1-pass。最速。source separation / drums / context correctionなし。',
   pro: '3-pass。STFT分離 + mix/harmonic/bass ensemble + drums + context correction。',
@@ -13,7 +15,7 @@ app.innerHTML = `
     <div>
       <p class="eyebrow">LOCAL AUDIO → MULTI-TRACK MIDI</p>
       <h1>Wav2mid <span>HQ</span></h1>
-      <p class="lead">音源はアップロードしません。ブラウザ内でSTFT source separation、複数AMT pass、ensemble、文脈補正、drum推定まで実行します。</p>
+      <p class="lead">音源はアップロードしません。軽量STFT分離から本物のHTDemucs neural 4-stemまで、ブラウザ内でsource separation、複数AMT、ensemble、文脈補正、drum推定を実行します。</p>
     </div>
     <div class="backend-pill"><span class="dot"></span><span id="backendLabel">backend: loading…</span></div>
   </section>
@@ -41,8 +43,18 @@ app.innerHTML = `
         </div>
         <p class="mode-note" id="modeNote">${MODE_COPY.pro}</p>
       </div>
+
+      <label class="neural-option" id="neuralOption">
+        <input id="neuralToggle" type="checkbox" />
+        <span class="neural-switch" aria-hidden="true"></span>
+        <span class="neural-copy">
+          <strong>NEURAL HQ · HTDemucs</strong>
+          <small>${NEURAL_MODEL.tracks.join(' / ')} · ${NEURAL_MODEL.sizeHint} · 音源は端末外へ送信しません</small>
+        </span>
+      </label>
+
       <div class="setting-row">
-        <label for="backendSelect">Compute</label>
+        <label for="backendSelect">AMT Compute</label>
         <select id="backendSelect">
           <option value="auto">Auto (WebGPU → WebGL → WASM)</option>
           <option value="webgpu">WebGPU</option>
@@ -65,7 +77,7 @@ app.innerHTML = `
   <section class="shell panel progress-panel" id="progressPanel" hidden>
     <div class="progress-head"><strong id="progressText">解析準備中…</strong><span id="progressPct">0%</span></div>
     <div class="progress-track"><div id="progressBar"></div></div>
-    <p class="muted small" id="progressHint">初回はモデル読み込みがあります。PRO/INSANEは複数passなので長尺曲ほど時間がかかります。</p>
+    <p class="muted small" id="progressHint">初回はモデル読み込みがあります。PRO/INSANEは複数pass、NEURAL HQはさらにHTDemucsモデルを初回取得するため時間がかかります。</p>
   </section>
 
   <section class="shell results" id="results" hidden>
@@ -106,7 +118,7 @@ app.innerHTML = `
     </div>
   </section>
 
-  <footer class="shell">Wav2mid HQ · client-side STFT + Spotify Basic Pitch · WebGPU/WebGL/WASM · multi-track MIDI</footer>
+  <footer class="shell">Wav2mid HQ · STFT / HTDemucs · Spotify Basic Pitch · WebGPU/WebGL/WASM · multi-track MIDI</footer>
 `;
 
 const el = id => document.getElementById(id);
@@ -122,6 +134,7 @@ const analyzeBtn = el('analyzeBtn');
 const fileInput = el('fileInput');
 const dropZone = el('dropZone');
 const audioPreview = el('audioPreview');
+const neuralToggle = el('neuralToggle');
 
 initializeBackend();
 
@@ -174,10 +187,21 @@ async function handleFile(file) {
 
 el('qualityGroup').addEventListener('click', event => {
   const button = event.target.closest('button[data-mode]');
-  if (!button) return;
+  if (!button || neuralToggle.checked) return;
   qualityMode = button.dataset.mode;
   [...el('qualityGroup').querySelectorAll('button')].forEach(b => b.classList.toggle('active', b === button));
   el('modeNote').textContent = MODE_COPY[qualityMode];
+});
+
+neuralToggle.addEventListener('change', () => {
+  el('qualityGroup').classList.toggle('disabled', neuralToggle.checked);
+  el('neuralOption').classList.toggle('active', neuralToggle.checked);
+  el('modeNote').textContent = neuralToggle.checked
+    ? `HTDemucs 4-stem neural分離 → mix/other/bass/vocals AMT ensemble。初回モデル取得 ${NEURAL_MODEL.sizeHint}。`
+    : MODE_COPY[qualityMode];
+  el('progressHint').textContent = neuralToggle.checked
+    ? 'NEURAL HQは初回のみ大容量HTDemucsモデルを取得します。モデル取得後も音源データはブラウザ内で処理されます。'
+    : '初回はモデル読み込みがあります。PRO/INSANEは複数passなので長尺曲ほど時間がかかります。';
 });
 
 el('backendSelect').addEventListener('change', async event => {
@@ -200,7 +224,8 @@ analyzeBtn.addEventListener('click', async () => {
 
   try {
     const start = performance.now();
-    result = await transcribe(audioBuffer, {
+    const runner = neuralToggle.checked ? transcribeNeural : transcribe;
+    result = await runner(audioBuffer, {
       mode: qualityMode,
       sensitivity: Number(el('sensitivity').value),
       minPitch: Number(el('minPitch').value),
@@ -212,6 +237,12 @@ analyzeBtn.addEventListener('click', async () => {
         infer: '複数AMT passを推論中…',
         ensemble: 'ensemble候補を融合中…',
         context: 'キー・コード文脈で補正中…',
+        'neural-prepare': 'HTDemucs用44.1kHz stereoへ正規化中…',
+        'neural-load': 'HTDemucsモデルを準備中…',
+        'neural-separate': 'HTDemucs neural 4-stem分離中…',
+        'neural-amt': '分離stemをMIDI解析中…',
+        'neural-ensemble': 'neural stem候補をensemble中…',
+        'neural-drums': 'isolated drum stemを解析中…',
         done: '完了',
       };
       updateProgress(value, `${labels[stage] ?? '解析中…'}${detail ? ` ${detail}` : ''}`);
@@ -222,7 +253,9 @@ analyzeBtn.addEventListener('click', async () => {
   } catch (error) {
     console.error(error);
     updateProgress(0, `解析失敗: ${error?.message ?? error}`);
-    el('progressHint').textContent = '開発者コンソールに詳細を出力しました。FASTや別Compute backendでも試せます。';
+    el('progressHint').textContent = neuralToggle.checked
+      ? 'HTDemucsモデル取得・WebGPU/WASM・メモリ容量を確認してください。通常PROは大容量neural modelなしで利用できます。'
+      : '開発者コンソールに詳細を出力しました。FASTや別Compute backendでも試せます。';
   } finally {
     analyzeBtn.disabled = false;
   }
@@ -254,8 +287,10 @@ function renderResult() {
   el('statPoly').textContent = result.stats.maxPolyphony;
   el('statEnsemble').textContent = `${Math.round(result.stats.ensembleRatio * 100)}%`;
   el('statRange').textContent = `${midiName(result.stats.lowestNote)} – ${midiName(result.stats.highestNote)}`;
-  el('rollLegend').textContent = `${MODES[qualityMode].label} · ${result.elapsedSeconds.toFixed(1)} sec processing`;
-  el('pipelineBackend').textContent = String(result.pipeline.backend).toUpperCase();
+  el('rollLegend').textContent = `${result.pipeline.mode ?? MODES[qualityMode].label} · ${result.elapsedSeconds.toFixed(1)} sec processing`;
+  el('pipelineBackend').textContent = result.pipeline.separatorBackend
+    ? `AMT ${String(result.pipeline.backend).toUpperCase()} · separator ${String(result.pipeline.separatorBackend).toUpperCase()}`
+    : String(result.pipeline.backend).toUpperCase();
 
   const pipelineSteps = [
     result.pipeline.sourceSeparation === 'off' ? 'No source separation' : result.pipeline.sourceSeparation,
