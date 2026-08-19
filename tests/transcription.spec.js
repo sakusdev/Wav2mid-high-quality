@@ -1,6 +1,14 @@
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 
+const EXPECTED_TONAL = [
+  ...[48, 60].map(pitchMidi => ({ time: 0.08, pitchMidi })),
+  ...[52, 64].map(pitchMidi => ({ time: 0.62, pitchMidi })),
+  ...[55, 67].map(pitchMidi => ({ time: 1.15, pitchMidi })),
+  ...[48, 55, 60, 64, 67].map(pitchMidi => ({ time: 1.70, pitchMidi })),
+];
+const EXPECTED_DRUM_ONSETS = [0.32, 0.52, 0.86, 1.08, 1.42, 1.63, 1.95, 2.20];
+
 function makeFixtureWav(path) {
   const sampleRate = 44100;
   const channels = 2;
@@ -64,7 +72,6 @@ function assertThreeMusicalTrackMidi(midiBytes) {
   expect(midiBytes.length).toBeGreaterThan(64);
   expect(midiBytes.subarray(0, 4).toString('ascii')).toBe('MThd');
   expect(midiBytes.readUInt16BE(8)).toBe(1);
-  // ToneJS writes one conductor/meta track plus our three musical tracks.
   expect(midiBytes.readUInt16BE(10)).toBe(4);
   const binary = midiBytes.toString('latin1');
   expect(binary).toContain('Wav2mid HQ · Harmony');
@@ -73,7 +80,42 @@ function assertThreeMusicalTrackMidi(midiBytes) {
   expect([...midiBytes].some(byte => byte === 0x99)).toBe(true);
 }
 
-test('PRO pipeline separates, ensembles, transcribes drums and exports multi-track MIDI', async ({ page }, testInfo) => {
+function scoreTonalNotes(actual, expected, tolerance = 0.20) {
+  const used = new Set();
+  let matched = 0;
+  for (const target of expected) {
+    let best = -1;
+    let bestDistance = Infinity;
+    for (let i = 0; i < actual.length; i += 1) {
+      if (used.has(i) || actual[i].pitchMidi !== target.pitchMidi) continue;
+      const distance = Math.abs(actual[i].startTimeSeconds - target.time);
+      if (distance <= tolerance && distance < bestDistance) { best = i; bestDistance = distance; }
+    }
+    if (best >= 0) { used.add(best); matched += 1; }
+  }
+  const recall = matched / Math.max(1, expected.length);
+  const precision = matched / Math.max(1, actual.length);
+  const f1 = (precision + recall) > 0 ? 2 * precision * recall / (precision + recall) : 0;
+  return { matched, expected: expected.length, actual: actual.length, recall, precision, f1 };
+}
+
+function scoreOnsets(actual, expected, tolerance = 0.12) {
+  const used = new Set();
+  let matched = 0;
+  for (const target of expected) {
+    let best = -1;
+    let bestDistance = Infinity;
+    for (let i = 0; i < actual.length; i += 1) {
+      if (used.has(i)) continue;
+      const distance = Math.abs(actual[i].time - target);
+      if (distance <= tolerance && distance < bestDistance) { best = i; bestDistance = distance; }
+    }
+    if (best >= 0) { used.add(best); matched += 1; }
+  }
+  return { matched, expected: expected.length, actual: actual.length, recall: matched / Math.max(1, expected.length) };
+}
+
+test('PRO pipeline separates, ensembles, meets accuracy gate and exports multi-track MIDI', async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   const wavPath = testInfo.outputPath('polyphonic-drums-44k-stereo.wav');
   makeFixtureWav(wavPath);
@@ -94,14 +136,7 @@ test('PRO pipeline separates, ensembles, transcribes drums and exports multi-tra
   await expect(page.locator('#backendLabel')).toContainText('WASM');
   await page.locator('[data-mode="pro"]').click();
   await page.locator('#analyzeBtn').click();
-  try {
-    await expect(page.locator('#results')).toBeVisible({ timeout: 270_000 });
-  } catch (error) {
-    console.log('progress:', await page.locator('#progressText').innerText(), await page.locator('#progressPct').innerText());
-    console.log('hint:', await page.locator('#progressHint').innerText());
-    console.log('backend:', await page.locator('#backendLabel').innerText());
-    throw error;
-  }
+  await expect(page.locator('#results')).toBeVisible({ timeout: 270_000 });
 
   const noteCount = Number((await page.locator('#statNotes').innerText()).replaceAll(',', ''));
   const drumCount = Number((await page.locator('#statDrums').innerText()).replaceAll(',', ''));
@@ -131,7 +166,12 @@ test('PRO pipeline separates, ensembles, transcribes drums and exports multi-tra
   expect(analysis.pipeline.ensemble).toBe(true);
   expect(analysis.pipeline.contextDecoder).toBe(true);
   expect(analysis.pipeline.stemPasses).toEqual(expect.arrayContaining(['mix', 'harmonic', 'bass']));
-  expect(analysis.notes.length).toBeGreaterThan(0);
-  expect(analysis.drums.length).toBeGreaterThan(0);
+
+  const tonalScore = scoreTonalNotes(analysis.notes, EXPECTED_TONAL);
+  const drumScore = scoreOnsets(analysis.drums, EXPECTED_DRUM_ONSETS);
+  console.log('HQ accuracy benchmark:', JSON.stringify({ tonal: tonalScore, drums: drumScore }));
+  expect(tonalScore.recall).toBeGreaterThanOrEqual(0.75);
+  expect(tonalScore.precision).toBeGreaterThanOrEqual(0.50);
+  expect(drumScore.recall).toBeGreaterThanOrEqual(0.75);
   expect(browserErrors).toEqual([]);
 });
