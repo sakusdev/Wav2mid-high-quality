@@ -10,6 +10,7 @@ import {
 import { Midi } from '@tonejs/midi';
 
 const MODEL_URL = '/model/basic-pitch/model.json';
+const TARGET_SAMPLE_RATE = 22050;
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 export const MODES = {
@@ -45,15 +46,18 @@ export async function transcribe(audioBuffer, options = {}, onProgress = () => {
   const contours = [];
   if (!basicPitchInstance) basicPitchInstance = new BasicPitch(MODEL_URL);
 
-  onProgress({ stage: 'infer', value: 0 });
+  onProgress({ stage: 'prepare', value: 0 });
+  const normalizedAudio = normalizeAudio(audioBuffer);
+
+  onProgress({ stage: 'infer', value: 0.01 });
   await basicPitchInstance.evaluateModel(
-    audioBuffer,
+    normalizedAudio,
     (frameChunk, onsetChunk, contourChunk) => {
       frames.push(...frameChunk);
       onsets.push(...onsetChunk);
       contours.push(...contourChunk);
     },
-    progress => onProgress({ stage: 'infer', value: progress }),
+    progress => onProgress({ stage: 'infer', value: 0.01 + progress * 0.91 }),
   );
 
   onProgress({ stage: 'decode', value: 0.93 });
@@ -72,6 +76,32 @@ export async function transcribe(audioBuffer, options = {}, onProgress = () => {
   const stats = buildStats(notes, audioBuffer.duration);
   onProgress({ stage: 'done', value: 1 });
   return { notes, rawNotes, tempo, key, chords, stats };
+}
+
+function normalizeAudio(audioBuffer) {
+  const sourceRate = audioBuffer.sampleRate;
+  const channels = audioBuffer.numberOfChannels;
+  const sourceLength = audioBuffer.length;
+  if (!sourceRate || !sourceLength || !channels) throw new Error('Decoded audio is empty.');
+
+  const channelData = Array.from({ length: channels }, (_, i) => audioBuffer.getChannelData(i));
+  const targetLength = Math.max(1, Math.round(sourceLength * TARGET_SAMPLE_RATE / sourceRate));
+  const output = new Float32Array(targetLength);
+  const ratio = sourceRate / TARGET_SAMPLE_RATE;
+
+  for (let i = 0; i < targetLength; i += 1) {
+    const pos = i * ratio;
+    const left = Math.min(sourceLength - 1, Math.floor(pos));
+    const right = Math.min(sourceLength - 1, left + 1);
+    const frac = pos - left;
+    let sample = 0;
+    for (let ch = 0; ch < channels; ch += 1) {
+      const data = channelData[ch];
+      sample += data[left] + (data[right] - data[left]) * frac;
+    }
+    output[i] = sample / channels;
+  }
+  return output;
 }
 
 function postProcessNotes(rawNotes, mode, options) {
