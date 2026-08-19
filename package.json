@@ -1,6 +1,6 @@
 {
   "name": "wav2mid-high-quality",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,7 +17,9 @@
     "@tensorflow/tfjs-backend-wasm": "4.21.0",
     "@tensorflow/tfjs-backend-webgpu": "4.21.0",
     "@tonejs/midi": "2.0.28",
-    "fft.js": "4.0.4"
+    "demucs-web": "1.0.2",
+    "fft.js": "4.0.4",
+    "onnxruntime-web": "1.27.0"
   },
   "overrides": {
     "@spotify/basic-pitch": {
