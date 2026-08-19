@@ -6,7 +6,7 @@
   "scripts": {
     "prepare-runtime": "node scripts/copy-runtime.mjs",
     "dev": "npm run prepare-runtime && vite",
-    "build": "npm run prepare-runtime && vite build",
+    "build": "npm run prepare-runtime && vite build && node scripts/check-static-assets.mjs",
     "preview": "vite preview",
     "test:e2e": "playwright test",
     "deploy": "npm run build && wrangler deploy"
