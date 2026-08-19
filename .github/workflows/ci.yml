@@ -16,7 +16,7 @@ jobs:
           package-manager-cache: false
       - run: npm install --no-audit --no-fund
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+      - run: google-chrome --version
       - run: npm run test:e2e
       - uses: actions/upload-artifact@v7
         with:
