@@ -29,6 +29,7 @@ export async function configureBackend(preference = 'auto') {
       const ok = await tf.setBackend(backend);
       if (!ok) continue;
       await tf.ready();
+      basicPitchInstance = null;
       return tf.getBackend();
     } catch (error) {
       lastError = error;
@@ -176,7 +177,7 @@ export function exportMidi(result, filename = 'transcription.mid') {
       for (let i = 0; i < note.pitchBends.length; i += stride) {
         track.addPitchBend({
           time: note.startTimeSeconds + note.durationSeconds * (i / note.pitchBends.length),
-          value: Math.max(-1, Math.min(1, note.pitchBends[i] / 2)),
+          value: note.pitchBends[i],
         });
       }
     }
