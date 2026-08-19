@@ -60,11 +60,12 @@ function makeFixtureWav(path) {
   fs.writeFileSync(path, buf);
 }
 
-function assertThreeTrackMidi(midiBytes) {
+function assertThreeMusicalTrackMidi(midiBytes) {
   expect(midiBytes.length).toBeGreaterThan(64);
   expect(midiBytes.subarray(0, 4).toString('ascii')).toBe('MThd');
   expect(midiBytes.readUInt16BE(8)).toBe(1);
-  expect(midiBytes.readUInt16BE(10)).toBe(3);
+  // ToneJS writes one conductor/meta track plus our three musical tracks.
+  expect(midiBytes.readUInt16BE(10)).toBe(4);
   const binary = midiBytes.toString('latin1');
   expect(binary).toContain('Wav2mid HQ · Harmony');
   expect(binary).toContain('Wav2mid HQ · Bass');
@@ -89,7 +90,6 @@ test('PRO pipeline separates, ensembles, transcribes drums and exports multi-tra
   await expect(page.locator('#fileInfo')).toContainText('0:02');
   await expect(page.locator('#fileInfo')).toContainText('2ch');
 
-  // The full regression uses the portable SIMD/thread-capable backend so CI does not depend on GPU hardware.
   await page.locator('#backendSelect').selectOption('wasm');
   await expect(page.locator('#backendLabel')).toContainText('WASM');
   await page.locator('[data-mode="pro"]').click();
@@ -118,7 +118,7 @@ test('PRO pipeline separates, ensembles, transcribes drums and exports multi-tra
   const midiDownload = await midiDownloadPromise;
   const midiPath = testInfo.outputPath('result.mid');
   await midiDownload.saveAs(midiPath);
-  assertThreeTrackMidi(fs.readFileSync(midiPath));
+  assertThreeMusicalTrackMidi(fs.readFileSync(midiPath));
 
   const jsonDownloadPromise = page.waitForEvent('download');
   await page.locator('#jsonBtn').click();
