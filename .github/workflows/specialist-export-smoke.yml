@@ -47,3 +47,13 @@ jobs:
           print(f'ONNX size: {size / 1024 / 1024:.2f} MiB')
           assert size > 1_000_000
           PY
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Install browser dependencies
+        run: npm install --no-audit --no-fund
+      - name: Run real ONNX through Chrome + ONNX Runtime Web/WASM
+        run: |
+          google-chrome --version
+          npm run specialist:browser-smoke -- --model /tmp/specialist-model/piano-crnn.onnx --seconds 1.0
