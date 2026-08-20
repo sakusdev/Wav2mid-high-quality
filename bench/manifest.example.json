@@ -1,0 +1,28 @@
+{
+  "name": "local AMT validation set",
+  "root": "/absolute/or/relative/dataset/root",
+  "metrics": {
+    "onsetTolerance": 0.05,
+    "offsetTolerance": 0.05,
+    "offsetRatio": 0.2,
+    "drumTolerance": 0.05
+  },
+  "items": [
+    {
+      "id": "song-001",
+      "split": "validation",
+      "audio": "audio/song-001.wav",
+      "reference": "midi/song-001.mid",
+      "instruments": ["acoustic_piano", "electric_bass", "drums"],
+      "tags": ["real-recording"]
+    },
+    {
+      "id": "song-002",
+      "split": "test",
+      "audio": "audio/song-002.flac",
+      "reference": "midi/song-002.mid",
+      "instruments": ["acoustic_piano"],
+      "tags": ["piano"]
+    }
+  ]
+}
