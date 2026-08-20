@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
-import { Midi } from '@tonejs/midi';
+import midiPackage from '@tonejs/midi';
+
+const { Midi } = midiPackage;
 
 export async function readMidiNotes(path) {
   const bytes = await fs.readFile(path);
