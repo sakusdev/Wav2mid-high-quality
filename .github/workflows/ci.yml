@@ -17,6 +17,8 @@ jobs:
       - run: npm install --no-audit --no-fund
       - name: Benchmark tooling syntax gate
         run: npm run test:bench:syntax
+      - name: MuScriptor bridge syntax gate
+        run: python3 -m py_compile tools/muscriptor_bridge.py
       - run: npm run build
       - name: Cloudflare temporary asset gate
         run: npm run check:temporary-assets
