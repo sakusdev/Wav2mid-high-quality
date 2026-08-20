@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-url", default=None,
                         help="URL to write into the generated metadata/manifest entry")
     parser.add_argument("--skip-parity", action="store_true")
+    parser.add_argument("--allow-unsafe-pickle", action="store_true",
+                        help="Allow torch.load(weights_only=False). Only use for a checkpoint you trust.")
     return parser.parse_args()
 
 
@@ -45,9 +47,8 @@ def main() -> int:
     try:
         import numpy as np
         import torch
-        import torch.nn as nn
         from piano_transcription_inference.models import Regress_onset_offset_frame_velocity_CRNN
-    except Exception as exc:
+    except Exception:
         print("Exporter dependencies are missing. Install torch, piano-transcription-inference, onnx and optionally onnxruntime.", file=sys.stderr)
         raise
 
@@ -59,7 +60,7 @@ def main() -> int:
         frames_per_second=args.frames_per_second,
         classes_num=args.classes,
     )
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = load_checkpoint(checkpoint_path, torch, args.allow_unsafe_pickle)
     raw_state = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
     state = normalize_state_dict(raw_state)
     load_result = base.load_state_dict(state, strict=False)
@@ -145,6 +146,27 @@ def main() -> int:
     return 0
 
 
+def load_checkpoint(path: Path, torch, allow_unsafe_pickle: bool):
+    """Load weights without executing arbitrary pickle code unless explicitly allowed."""
+    if path.suffix.lower() == ".safetensors":
+        try:
+            from safetensors.torch import load_file
+        except ImportError as exc:
+            raise RuntimeError("safetensors checkpoint supplied; install safetensors") from exc
+        return load_file(str(path), device="cpu")
+
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as safe_error:
+        if not allow_unsafe_pickle:
+            raise RuntimeError(
+                "Safe weights-only checkpoint loading failed. Do not disable this protection for an untrusted .pth file. "
+                "If you have independently verified the checkpoint source, rerun with --allow-unsafe-pickle, or convert it to safetensors first."
+            ) from safe_error
+        print("WARNING: loading checkpoint with weights_only=False because --allow-unsafe-pickle was explicitly supplied.", file=sys.stderr)
+        return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def normalize_state_dict(raw_state):
     state = {}
     if not isinstance(raw_state, dict):
@@ -180,7 +202,6 @@ def sha256(path: Path) -> str:
 def FrontendlessCrnn(base):
     import torch
     import torch.nn as nn
-    import torch.nn.functional as F
 
     class _FrontendlessCrnn(nn.Module):
         def __init__(self, source):
