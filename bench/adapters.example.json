@@ -1,0 +1,122 @@
+{
+  "adapters": {
+    "wav2mid-pro": {
+      "type": "browser",
+      "mode": "pro",
+      "backend": "wasm",
+      "sensitivity": 1.0
+    },
+    "wav2mid-insane": {
+      "type": "browser",
+      "mode": "insane",
+      "backend": "wasm",
+      "sensitivity": 1.0
+    },
+    "wav2mid-neural": {
+      "type": "browser",
+      "mode": "insane",
+      "backend": "wasm",
+      "sensitivity": 1.0,
+      "neural": true,
+      "timeoutMs": 1800000
+    },
+    "muscriptor-small": {
+      "type": "command",
+      "format": "midi",
+      "command": [
+        "uvx",
+        "muscriptor",
+        "transcribe",
+        "{audio}",
+        "-o",
+        "{output}",
+        "--model",
+        "small"
+      ]
+    },
+    "muscriptor-medium-conditioned": {
+      "type": "command",
+      "format": "midi",
+      "command": [
+        "uvx",
+        "muscriptor",
+        "transcribe",
+        "{audio}",
+        "-o",
+        "{output}",
+        "--model",
+        "medium",
+        "--instruments",
+        "{instruments}"
+      ]
+    },
+    "semi-crf-bass-v2": {
+      "type": "command",
+      "format": "midi",
+      "cwd": "/path/to/instrument-agnostic-amt",
+      "command": [
+        "python",
+        "infer.py",
+        "--type",
+        "bass_v2",
+        "--audio",
+        "{audio}",
+        "--output-midi",
+        "{output}"
+      ]
+    },
+    "semi-crf-vocal": {
+      "type": "command",
+      "format": "midi",
+      "cwd": "/path/to/instrument-agnostic-amt",
+      "command": [
+        "python",
+        "infer.py",
+        "--type",
+        "vocal",
+        "--audio",
+        "{audio}",
+        "--output-midi",
+        "{output}"
+      ]
+    },
+    "semi-crf-guitar-v1-5": {
+      "type": "command",
+      "format": "midi",
+      "cwd": "/path/to/instrument-agnostic-amt",
+      "command": [
+        "python",
+        "infer.py",
+        "--type",
+        "guitar_v1_5",
+        "--audio",
+        "{audio}",
+        "--output-midi",
+        "{output}"
+      ]
+    },
+    "semi-crf-drums": {
+      "type": "command",
+      "format": "midi",
+      "cwd": "/path/to/instrument-agnostic-amt",
+      "command": [
+        "python",
+        "infer.py",
+        "--type",
+        "drums",
+        "--audio",
+        "{audio}",
+        "--output-midi",
+        "{output}"
+      ]
+    },
+    "yourmt3plus-precomputed": {
+      "type": "precomputed",
+      "path": "/path/to/yourmt3plus-results/{id}.mid"
+    },
+    "youtabs-precomputed": {
+      "type": "precomputed",
+      "path": "/path/to/youtabs-results/{id}.mid"
+    }
+  }
+}
