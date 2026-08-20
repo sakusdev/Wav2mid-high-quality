@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import process from 'node:process';
 import { chromium } from '@playwright/test';
 
@@ -15,13 +16,17 @@ export class BrowserBenchRunner {
 
   async start({ build = true } = {}) {
     if (build) await runCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build']);
-    this.preview = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'preview', '--', '--host', '127.0.0.1', '--port', String(this.port)], {
+    const viteBin = path.resolve('node_modules/vite/bin/vite.js');
+    this.preview = spawn(process.execPath, [viteBin, 'preview', '--host', '127.0.0.1', '--port', String(this.port), '--strictPort'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
     });
     let previewLog = '';
     this.preview.stdout.on('data', chunk => { previewLog += chunk.toString(); });
     this.preview.stderr.on('data', chunk => { previewLog += chunk.toString(); });
+    this.preview.once('exit', code => {
+      if (code && code !== 0) previewLog += `\nVite preview exited with ${code}`;
+    });
     await waitForHttp(this.baseUrl, 20_000).catch(error => {
       throw new Error(`Vite preview failed to start. ${error.message}\n${previewLog.slice(-3000)}`);
     });
@@ -31,8 +36,19 @@ export class BrowserBenchRunner {
   async stop() {
     await this.browser?.close().catch(() => {});
     this.browser = null;
-    if (this.preview && !this.preview.killed) this.preview.kill('SIGTERM');
+    const preview = this.preview;
     this.preview = null;
+    if (!preview || preview.exitCode != null) return;
+    const exited = new Promise(resolve => preview.once('exit', resolve));
+    preview.kill('SIGTERM');
+    const graceful = await Promise.race([
+      exited.then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 3000)),
+    ]);
+    if (!graceful && preview.exitCode == null) {
+      preview.kill('SIGKILL');
+      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 1000))]);
+    }
   }
 
   async run(audioPath, config = {}) {
@@ -50,7 +66,10 @@ export class BrowserBenchRunner {
 
       const mode = String(config.mode ?? 'pro').toLowerCase();
       if (['fast', 'pro', 'insane'].includes(mode)) await page.locator(`button[data-mode="${mode}"]`).click();
-      if (config.backend && config.backend !== 'auto') await page.locator('#backendSelect').selectOption(config.backend);
+      if (config.backend && config.backend !== 'auto') {
+        await page.locator('#backendSelect').selectOption(config.backend);
+        await page.waitForFunction(expected => (document.querySelector('#backendLabel')?.textContent ?? '').toLowerCase().includes(expected), String(config.backend).toLowerCase());
+      }
       if (config.neural) await page.locator('#neuralOption').click();
       if (config.sensitivity != null) {
         await page.locator('#sensitivity').evaluate((element, value) => {
