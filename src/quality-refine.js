@@ -21,6 +21,7 @@ export function refineResult(input, duration) {
     const mergeGap = mode.includes('INSANE') ? 0.09 : 0.08;
     notes = mergeAdjacent(notes, mergeGap);
     notes = pruneShortHighHarmonics(notes);
+    if (mode.includes('INSANE')) notes = applyInsaneConsensus(notes);
   }
 
   notes.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds || a.pitchMidi - b.pitchMidi);
@@ -33,8 +34,9 @@ export function refineResult(input, duration) {
   result.key = keyDetail.label;
   result.chords = chords;
   result.stats = rebuildStats(result, notes, duration);
-  result.pipeline.qualityRefiner = 'realworld-v1';
+  result.pipeline.qualityRefiner = 'realworld-v2';
   result.pipeline.chordWindow = 'tempo-aware-two-beat';
+  if (mode.includes('INSANE')) result.pipeline.consensusGate = '3-of-4-or-exceptional';
   return result;
 }
 
@@ -92,6 +94,18 @@ function pruneShortHighHarmonics(notes) {
     }
   }
   return notes.filter((_, index) => !removed.has(index));
+}
+
+function applyInsaneConsensus(notes) {
+  return notes.filter(note => {
+    const agreement = note.agreement ?? note.sources?.length ?? 1;
+    if (agreement >= 3) return true;
+    const confidence = note.confidence ?? note.amplitude ?? 0;
+    // Preserve only exceptionally strong, sustained two-pass events. This keeps INSANE
+    // usable for sparse/atypical timbres while stopping the fourth pass from becoming a
+    // low-threshold false-positive generator.
+    return agreement >= 2 && confidence >= 0.92 && note.durationSeconds >= 0.22;
+  });
 }
 
 function estimateKeyDetail(notes) {
