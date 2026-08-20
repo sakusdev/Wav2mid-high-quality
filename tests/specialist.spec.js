@@ -8,7 +8,7 @@ import {
 import { postprocessSpecialistOutputs } from '../src/specialist-postprocess.js';
 import { promotedSpecialists } from '../src/specialist-runtime.js';
 
-test('specialist frontend produces torchlibrosa-compatible shape and finite log-mel values', () => {
+test('specialist frontend matches fixed librosa log-mel reference values', () => {
   const samples = new Float32Array(1600);
   for (let i = 0; i < samples.length; i += 1) {
     const t = i / SPECIALIST_FRONTEND.sampleRate;
@@ -18,7 +18,23 @@ test('specialist frontend produces torchlibrosa-compatible shape and finite log-
   expect(feature.dims).toEqual([1, 1, 11, 229]);
   expect(feature.data.length).toBe(11 * 229);
   expect([...feature.data].every(Number.isFinite)).toBe(true);
-  expect(Math.max(...feature.data)).toBeGreaterThan(-80);
+
+  // Generated with librosa 0.11 using n_fft=2048, hop=160, periodic Hann,
+  // center=True, pad_mode=reflect, 229 Slaney-normalized mels, fmin=30,
+  // fmax=8000, power_to_db(ref=1, amin=1e-10, top_db=None).
+  const references = [
+    [0, 0, 4.2649646],
+    [0, 50, 0.85334605],
+    [0, 100, -14.752933],
+    [5, 20, -3.8243282],
+    [5, 100, -32.208767],
+    [5, 150, -42.47445],
+    [10, 100, -14.88327],
+    [10, 200, -35.92918],
+  ];
+  for (const [time, mel, expected] of references) {
+    expect(feature.data[time * 229 + mel]).toBeCloseTo(expected, 1);
+  }
 });
 
 test('specialist segmentation and deframe use 10 second windows with 50% overlap', () => {
@@ -41,12 +57,12 @@ test('specialist segmentation and deframe use 10 second windows with 50% overlap
   expect(merged.frame_output.data[1200]).toBe(2);
 });
 
-test('regression postprocessor detects onset, offset, duration and velocity', () => {
+test('regression postprocessor applies sub-frame onset/offset regression and velocity', () => {
   const frames = 30;
   const onset = matrix(frames, 1, 0.01);
-  setCurve(onset.data, 5, [0.1, 0.3, 0.8, 0.4, 0.2], 3);
+  setCurve(onset.data, [0.1, 0.3, 0.8, 0.4, 0.2], 3);
   const offset = matrix(frames, 1, 0.01);
-  setCurve(offset.data, 15, [0.05, 0.1, 0.2, 0.4, 0.8, 0.4, 0.2, 0.1, 0.05], 11);
+  setCurve(offset.data, [0.05, 0.1, 0.2, 0.4, 0.8, 0.4, 0.2, 0.1, 0.05], 11);
   const frame = matrix(frames, 1, 0.02);
   for (let i = 5; i <= 15; i += 1) frame.data[i] = 0.8;
   const velocity = matrix(frames, 1, 0.1);
@@ -61,8 +77,8 @@ test('regression postprocessor detects onset, offset, duration and velocity', ()
 
   expect(notes).toHaveLength(1);
   expect(notes[0].pitchMidi).toBe(60);
-  expect(notes[0].startTimeSeconds).toBeCloseTo(0.05, 3);
-  expect(notes[0].durationSeconds).toBeCloseTo(0.10, 2);
+  expect(notes[0].startTimeSeconds).toBeCloseTo(0.051, 3);
+  expect(notes[0].durationSeconds).toBeCloseTo(0.099, 3);
   expect(notes[0].velocity).toBe(89);
   expect(notes[0].confidence).toBeGreaterThan(0.6);
   expect(notes[0].source).toBe('specialist:test');
@@ -94,7 +110,6 @@ function matrix(frames, classes, fill) {
   return { data, dims: [frames, classes] };
 }
 
-function setCurve(target, center, values, start) {
-  void center;
+function setCurve(target, values, start) {
   for (let i = 0; i < values.length; i += 1) target[start + i] = values[i];
 }
