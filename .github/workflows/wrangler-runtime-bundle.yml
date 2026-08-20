@@ -5,6 +5,9 @@ on:
     branches: [ops/wrangler-bundle]
     paths:
       - .github/workflows/wrangler-runtime-bundle.yml
+  pull_request:
+    paths:
+      - .github/workflows/wrangler-runtime-bundle.yml
 
 permissions:
   contents: read
