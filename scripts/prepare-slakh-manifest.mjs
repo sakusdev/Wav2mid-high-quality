@@ -1,7 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import { Midi } from '@tonejs/midi';
+import midiPackage from '@tonejs/midi';
+
+const { Midi } = midiPackage;
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.root) {
