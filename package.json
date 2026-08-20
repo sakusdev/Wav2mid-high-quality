@@ -1,6 +1,6 @@
 {
   "name": "wav2mid-high-quality",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,11 +10,14 @@
     "preview": "vite preview",
     "test:e2e": "playwright test",
     "test:bench:syntax": "node --check scripts/benchmark-metrics.mjs && node --check scripts/browser-bench-runner.mjs && node --check scripts/benchmark-suite.mjs && node --check scripts/tune.mjs && node --check scripts/prepare-maestro-manifest.mjs && node --check scripts/prepare-slakh-manifest.mjs && node --check scripts/create-benchmark-smoke-fixture.mjs",
+    "test:specialist:syntax": "node --check src/specialist-frontend.js && node --check src/specialist-postprocess.js && node --check src/specialist-runtime.js && node --check scripts/promote-specialist.mjs && node --check scripts/browser-specialist-model-smoke.mjs && python3 -m py_compile scripts/export-crnn-specialist.py",
     "test:bench:smoke": "node scripts/create-benchmark-smoke-fixture.mjs && node scripts/benchmark-suite.mjs --manifest .benchmark-smoke/manifest.json --adapters .benchmark-smoke/adapters.json --adapter wav2mid-fast-smoke --split test --max-items 1 --no-build --output .benchmark-smoke/results --cache .benchmark-smoke/cache --min-objective 0.20",
     "benchmark:reference": "node scripts/compare-reference.mjs",
     "benchmark:suite": "node scripts/benchmark-suite.mjs",
     "benchmark:prepare-maestro": "node scripts/prepare-maestro-manifest.mjs",
     "benchmark:prepare-slakh": "node scripts/prepare-slakh-manifest.mjs",
+    "specialist:promote": "node scripts/promote-specialist.mjs",
+    "specialist:browser-smoke": "node scripts/browser-specialist-model-smoke.mjs",
     "tune": "node scripts/tune.mjs",
     "check:temporary-assets": "node scripts/check-static-assets.mjs --limit-mib=5",
     "deploy": "npm run build && wrangler deploy",
