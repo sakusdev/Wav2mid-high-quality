@@ -9,6 +9,7 @@
     "build": "npm run prepare-runtime && vite build && node scripts/check-static-assets.mjs --limit-mib=25",
     "preview": "vite preview",
     "test:e2e": "playwright test",
+    "benchmark:reference": "node scripts/compare-reference.mjs",
     "check:temporary-assets": "node scripts/check-static-assets.mjs --limit-mib=5",
     "deploy": "npm run build && wrangler deploy",
     "deploy:temporary": "npm run build && npm run check:temporary-assets && wrangler deploy --temporary"
