@@ -1,0 +1,33 @@
+name: Wrangler runtime bundle
+
+on:
+  push:
+    branches: [ops/wrangler-bundle]
+    paths:
+      - .github/workflows/wrangler-runtime-bundle.yml
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install pinned Wrangler runtime
+        working-directory: ${{ runner.temp }}
+        run: |
+          npm init -y
+          npm install --no-audit --no-fund wrangler@4.121.0
+          tar -czf wrangler-runtime.tgz node_modules package.json package-lock.json
+          ls -lh wrangler-runtime.tgz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wrangler-runtime-linux-x64
+          path: ${{ runner.temp }}/wrangler-runtime.tgz
+          if-no-files-found: error
+          retention-days: 1
