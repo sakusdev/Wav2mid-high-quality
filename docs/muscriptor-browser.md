@@ -41,9 +41,29 @@ The normal application startup does not load MuScriptor, ONNX Runtime, or MuScri
 
 Audio is decoded and transcribed on the user's device. The audio file is not uploaded to a transcription server. Network requests made by ULTRA are limited to application/runtime/model assets required to execute the model.
 
-## Model distribution
+## Model distribution on Cloudflare
 
-MuScriptor model weights and derived browser ONNX files are **not committed to this repository**. The decoder is larger than Cloudflare Workers Static Assets' per-file deployment gate, so production must serve the derived ONNX assets from an external model host and point the generated manifest URLs at that host.
+MuScriptor model weights and derived browser ONNX files are **not committed to this repository**. Deployment generates the derived browser graphs from the upstream checkpoint only when a real Cloudflare deployment is being built.
+
+The INT4 decoder is roughly 55 MiB, larger than Workers Static Assets' single-file gate and the repository's stricter 5 MiB temporary-preview gate. `tools/stage_muscriptor_cloudflare.py` therefore splits oversized ONNX files into <=4.5 MiB immutable static parts.
+
+The public browser manifest deliberately keeps the original `.onnx` URL. `worker.js` intercepts that URL and streams the static parts in order from the `ASSETS` binding, so ONNX Runtime Web receives the exact original byte stream and does not need a custom model loader. The heavy export CI verifies the reconstructed decoder's byte count and SHA-256 against the original exported ONNX file.
+
+```text
+browser /models/.../decoder.onnx
+          ↓
+Cloudflare worker.js
+          ↓
+stream-map.json → decoder.parts.json
+          ↓
+part-000.bin
+part-001.bin
+...
+          ↓ streamed, no full Worker-side buffering
+exact original ONNX byte stream
+```
+
+This lets both normal and temporary Cloudflare deployments satisfy their per-file limits while keeping the Git repository free of large binary model artifacts.
 
 The application code is MIT. MuScriptor model weights/derived model artifacts retain their upstream **CC BY-NC 4.0** terms. ULTRA is therefore explicitly marked `NC` in the UI and must not be represented as a commercial-use model path.
 
@@ -60,15 +80,17 @@ Mixed FP16 activation is an optimization candidate, not a correctness requiremen
 
 ## Validation gates
 
-A browser artifact is not considered usable merely because ONNX export succeeds. The PR gate checks, in order:
+A browser artifact is not considered usable merely because ONNX export succeeds. The gates check, in order:
 
 1. PyTorch wrapper parity against the loaded MuScriptor-small checkpoint.
 2. FP32 ONNX Runtime parity.
 3. Final conditioner → INT4 decoder execution with ONNX Runtime CPU.
 4. Output dtype/shape/finiteness and every layer's K/V shape.
 5. Deterministic first-token fixture recorded into the model manifest.
-6. Chrome WebGPU execution of the **final conditioner and final INT4 decoder**, using the same fixture.
-7. WebGPU first token must equal the CPU ORT first token.
+6. Cloudflare-safe chunk staging with every static asset <=5 MiB.
+7. Local Wrangler reconstruction of the streamed decoder with exact byte-count and SHA-256 parity.
+8. Chrome WebGPU execution of the **final conditioner and final INT4 decoder**, using the same fixture when the CI machine exposes a WebGPU adapter.
+9. When WebGPU is available, its first token must equal the CPU ORT first token. Adapter absence on GitHub's hosted Linux runner is reported as an infrastructure skip rather than a model failure.
 
 The ordinary CI remains lightweight: it verifies the UI is lazy and uses a mocked browser model. It does not download the large non-commercial checkpoint on every commit.
 
