@@ -1,4 +1,5 @@
 import { transcribe } from './transcribe.js';
+import { loadSpecialistManifest, promotedSpecialists, runPromotedStemSpecialists } from './specialist-runtime.js';
 
 const DEMUCS_SAMPLE_RATE = 44100;
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -16,6 +17,9 @@ export async function transcribeNeural(audioBuffer, options = {}, onProgress = (
 
   onProgress({ stage: 'neural-separate', value: 0.16, detail: `HTDemucs · ${separatorBackend}` });
   const stems = await processor.separate(stereo.left, stereo.right);
+  for (const stem of Object.values(stems)) {
+    if (stem && typeof stem === 'object' && stem.sampleRate == null) stem.sampleRate = DEMUCS_SAMPLE_RATE;
+  }
   onProgress({ stage: 'neural-separate', value: 0.46, detail: 'drums / bass / other / vocals ready' });
 
   const passSpecs = [
@@ -36,7 +40,7 @@ export async function transcribeNeural(audioBuffer, options = {}, onProgress = (
       minPitch: spec.minPitch,
       maxPitch: spec.maxPitch,
     }, ({ value, detail }) => {
-      const mapped = 0.48 + ((index + Math.max(0, Math.min(1, value ?? 0))) / passSpecs.length) * 0.42;
+      const mapped = 0.48 + ((index + Math.max(0, Math.min(1, value ?? 0))) / passSpecs.length) * 0.37;
       onProgress({ stage: 'neural-amt', value: mapped, detail: `${spec.name}${detail ? ` · ${detail}` : ''}` });
     });
     passResults[spec.name] = result;
@@ -53,7 +57,36 @@ export async function transcribeNeural(audioBuffer, options = {}, onProgress = (
     }
   }
 
-  onProgress({ stage: 'neural-ensemble', value: 0.91, detail: `${candidates.length} stem candidates` });
+  const specialistManifest = await loadSpecialistManifest();
+  const specialistConfigs = promotedSpecialists(specialistManifest);
+  let specialistResults = [];
+  if (specialistConfigs.length) {
+    onProgress({ stage: 'neural-specialist', value: 0.85, detail: `${specialistConfigs.length} benchmark-promoted model(s)` });
+    specialistResults = await runPromotedStemSpecialists(stems, specialistManifest, progress => {
+      onProgress({
+        stage: 'neural-specialist',
+        value: 0.85 + clamp(Number(progress.value ?? 0), 0, 1) * 0.055,
+        detail: progress.detail ?? 'specialist CRNN',
+      });
+    });
+    for (const specialist of specialistResults) {
+      const weight = Number(specialist.model?.ensembleWeight ?? 1.35);
+      for (const note of specialist.notes) {
+        const source = note.source ?? `specialist:${specialist.name}`;
+        candidates.push({
+          ...note,
+          source,
+          sources: [...new Set(note.sources?.length ? note.sources : [source])],
+          agreement: 1,
+          neuralWeight: weight,
+          confidence: clamp((note.confidence ?? note.amplitude ?? 0.5) * weight, 0, 1),
+          instrument: specialist.model?.instrument === 'bass' ? 'bass' : (note.instrument ?? 'harmony'),
+        });
+      }
+    }
+  }
+
+  onProgress({ stage: 'neural-ensemble', value: 0.91, detail: `${candidates.length} stem + specialist candidates` });
   const harmonicReference = passResults.other?.chords?.length ? passResults.other : passResults.mix;
   let notes = fuseStemCandidates(candidates);
   notes = contextCorrect(notes, harmonicReference?.chords ?? [], harmonicReference?.keyDetail ?? passResults.mix?.keyDetail);
@@ -66,7 +99,7 @@ export async function transcribeNeural(audioBuffer, options = {}, onProgress = (
   const key = harmonicReference?.key ?? passResults.mix?.key ?? '—';
   const keyDetail = harmonicReference?.keyDetail ?? passResults.mix?.keyDetail;
   const chords = harmonicReference?.chords ?? passResults.mix?.chords ?? [];
-  const stats = buildStats(notes, drums, audioBuffer.duration, candidates.length);
+  const stats = buildStats(notes, drums, audioBuffer.duration, candidates.length, passSpecs.length + specialistResults.length);
   onProgress({ stage: 'done', value: 1, detail: `${notes.length} notes · ${drums.length} drums` });
 
   return {
@@ -83,7 +116,16 @@ export async function transcribeNeural(audioBuffer, options = {}, onProgress = (
       backend: passResults.mix?.pipeline?.backend ?? 'unknown',
       separatorBackend,
       sourceSeparation: 'HTDemucs 4-stem neural (ONNX Runtime Web)',
-      stemPasses: ['mix', 'other', 'bass', 'vocals'],
+      stemPasses: ['mix', 'other', 'bass', 'vocals', ...specialistResults.map(item => `specialist:${item.name}`)],
+      specialistTranscription: specialistResults.length > 0,
+      specialistModels: specialistResults.map(item => ({
+        name: item.name,
+        stem: item.stem,
+        instrument: item.model?.instrument ?? null,
+        source: item.model?.source ?? null,
+        checkpointSha256: item.model?.checkpointSha256 ?? null,
+        promotion: item.model?.promotion ?? null,
+      })),
       ensemble: true,
       contextDecoder: true,
       drumTranscription: true,
@@ -404,7 +446,7 @@ function onePoleHighPass(input, sampleRate, cutoff) {
   return output;
 }
 
-function buildStats(notes, drums, duration, candidateCount) {
+function buildStats(notes, drums, duration, candidateCount, passCount = 4) {
   const events = [];
   for (const note of notes) {
     events.push([note.startTimeSeconds, 1]);
@@ -425,7 +467,7 @@ function buildStats(notes, drums, duration, candidateCount) {
     ensembleBacked,
     ensembleRatio: notes.length ? ensembleBacked / notes.length : 0,
     chunks: 1,
-    passCount: 4,
+    passCount,
   };
 }
 
