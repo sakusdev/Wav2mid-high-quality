@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -29,12 +30,70 @@ jobs:
             echo "ready=false" >> "$GITHUB_OUTPUT"
             echo "::warning::Cloudflare deploy skipped: CLOUDFLARE_API_TOKEN and/or CLOUDFLARE_ACCOUNT_ID is not configured."
           fi
-      - name: Install dependencies
+
+      - name: Install Node dependencies
         if: steps.cloudflare.outputs.ready == 'true'
         run: npm install --no-audit --no-fund
-      - name: Build
+
+      - uses: actions/setup-python@v6
         if: steps.cloudflare.outputs.ready == 'true'
-        run: npm run build
+        with:
+          python-version: '3.12'
+
+      - name: Install MuScriptor exporter dependencies
+        if: steps.cloudflare.outputs.ready == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install \
+            'git+https://github.com/muscriptor/muscriptor.git' \
+            huggingface_hub onnx onnxruntime onnxconverter-common onnx-ir
+
+      - name: Fetch non-commercial MuScriptor small weights
+        if: steps.cloudflare.outputs.ready == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+
+          out = Path('.muscriptor-source')
+          out.mkdir(exist_ok=True)
+          token = os.environ.get('HF_TOKEN') or None
+          repo = 'MuScriptor/muscriptor-small' if token else 'cocktailpeanut/muscriptor-small'
+          try:
+              model = hf_hub_download(repo_id=repo, filename='model.safetensors', token=token)
+          except Exception:
+              if repo == 'cocktailpeanut/muscriptor-small':
+                  raise
+              repo = 'cocktailpeanut/muscriptor-small'
+              model = hf_hub_download(repo_id=repo, filename='model.safetensors')
+          target = out / 'model.safetensors'
+          target.symlink_to(Path(model).resolve())
+          (out / 'SOURCE.txt').write_text(repo + '\n')
+          print(f'weight source: {repo} ({target.stat().st_size} bytes)')
+          PY
+
+      - name: Export and split MuScriptor browser model
+        if: steps.cloudflare.outputs.ready == 'true'
+        run: |
+          python tools/export_muscriptor_browser_v3.py \
+            --weights .muscriptor-source/model.safetensors \
+            --output .muscriptor-browser \
+            --source "$(cat .muscriptor-source/SOURCE.txt)"
+          python tools/smoke_muscriptor_int4.py .muscriptor-browser
+          rm -rf public/models/muscriptor-small
+          python tools/stage_muscriptor_cloudflare.py \
+            .muscriptor-browser public/models/muscriptor-small --chunk-mib 4.5
+
+      - name: Build with Cloudflare-safe model chunks
+        if: steps.cloudflare.outputs.ready == 'true'
+        run: |
+          npm run build
+          npm run check:temporary-assets
+
       - name: Deploy
         if: steps.cloudflare.outputs.ready == 'true'
         id: deploy
@@ -49,6 +108,7 @@ jobs:
           else
             echo "### Cloudflare deploy completed; inspect Wrangler output for the deployment URL." >> "$GITHUB_STEP_SUMMARY"
           fi
+
       - name: Report skipped deployment
         if: steps.cloudflare.outputs.ready != 'true'
         run: echo "### Deployment skipped — add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets." >> "$GITHUB_STEP_SUMMARY"
