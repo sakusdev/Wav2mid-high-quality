@@ -1,0 +1,49 @@
+name: Specialist export smoke
+
+on:
+  pull_request:
+
+jobs:
+  export-real-checkpoint:
+    if: github.event.pull_request.number == 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install export dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install piano-transcription-inference onnx onnxruntime safetensors huggingface_hub
+      - name: Download safe MIT piano checkpoint
+        run: |
+          python - <<'PY'
+          from huggingface_hub import hf_hub_download
+          p = hf_hub_download(
+              repo_id='xavriley/midi-transcription-models',
+              filename='piano_kroma.safetensors',
+              revision='689e773',
+              local_dir='/tmp/specialist-model',
+          )
+          print(p)
+          PY
+      - name: Export frontendless ONNX and verify parity
+        run: |
+          python scripts/export-crnn-specialist.py \
+            --checkpoint /tmp/specialist-model/piano_kroma.safetensors \
+            --output /tmp/specialist-model/piano-crnn.onnx \
+            --instrument piano \
+            --source 'xavriley/midi-transcription-models@689e773:piano_kroma.safetensors'
+          python - <<'PY'
+          import json, os
+          meta = json.load(open('/tmp/specialist-model/piano-crnn.json'))
+          print(json.dumps(meta['parity'], indent=2))
+          assert meta['parity'] is not None
+          assert meta['parity']['maximum'] < 1e-4, meta['parity']
+          size = os.path.getsize('/tmp/specialist-model/piano-crnn.onnx')
+          print(f'ONNX size: {size / 1024 / 1024:.2f} MiB')
+          assert size > 1_000_000
+          PY
