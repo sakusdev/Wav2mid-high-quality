@@ -110,6 +110,58 @@
         "{output}"
       ]
     },
+    "hf-midi-piano": {
+      "type": "command",
+      "format": "midi",
+      "command": [
+        "midi_transcription",
+        "{audio}",
+        "{output}",
+        "--instrument",
+        "piano",
+        "--device",
+        "cpu"
+      ]
+    },
+    "hf-midi-bass": {
+      "type": "command",
+      "format": "midi",
+      "command": [
+        "midi_transcription",
+        "{audio}",
+        "{output}",
+        "--instrument",
+        "bass",
+        "--device",
+        "cpu"
+      ]
+    },
+    "hf-midi-guitar": {
+      "type": "command",
+      "format": "midi",
+      "command": [
+        "midi_transcription",
+        "{audio}",
+        "{output}",
+        "--instrument",
+        "guitar",
+        "--device",
+        "cpu"
+      ]
+    },
+    "adtof-drums": {
+      "type": "command",
+      "format": "midi",
+      "command": [
+        "adtof",
+        "--audio",
+        "{audio}",
+        "--out",
+        "{output}",
+        "--device",
+        "cpu"
+      ]
+    },
     "yourmt3plus-precomputed": {
       "type": "precomputed",
       "path": "/path/to/yourmt3plus-results/{id}.mid"
