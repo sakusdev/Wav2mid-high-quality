@@ -217,7 +217,8 @@ function f1(precision, recall) {
 }
 
 export function objectiveScore(metrics) {
-  const drumWeight = metrics.drums.reference > 0 ? 0.10 : 0;
+  // Drum hallucinations must hurt even on drumless references (e.g. piano attacks misread as drums).
+  const drumWeight = metrics.drums.reference > 0 || metrics.drums.predicted > 0 ? 0.10 : 0;
   const tonalWeight = 1 - drumWeight;
   const tonal = metrics.onset.f1 * 0.55 + metrics.offset.f1 * 0.20 + metrics.frame.f1 * 0.25;
   return tonal * tonalWeight + metrics.drums.f1 * drumWeight;
