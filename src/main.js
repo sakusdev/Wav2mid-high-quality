@@ -1,6 +1,7 @@
 import './style.css';
 import { configureBackend, exportJson, exportMidi, midiName, MODES, transcribe } from './transcribe.js';
 import { neuralModelDescription, transcribeNeural } from './neural-transcribe.js';
+import { refineResult } from './quality-refine.js';
 
 const NEURAL_MODEL = neuralModelDescription();
 const MODE_COPY = {
@@ -247,6 +248,7 @@ analyzeBtn.addEventListener('click', async () => {
       };
       updateProgress(value, `${labels[stage] ?? '解析中…'}${detail ? ` ${detail}` : ''}`);
     });
+    result = refineResult(result, audioBuffer.duration);
     result.elapsedSeconds = (performance.now() - start) / 1000;
     backendLabel.textContent = `backend: ${String(result.pipeline.backend).toUpperCase()}`;
     renderResult();
@@ -297,9 +299,10 @@ function renderResult() {
     `${result.pipeline.stemPasses.join(' + ')} AMT`,
     result.pipeline.ensemble ? 'confidence ensemble' : 'single-pass',
     result.pipeline.contextDecoder ? 'key/chord context decoder' : 'context decoder off',
+    result.pipeline.qualityRefiner ? 'real-world quality refiner' : null,
     result.pipeline.drumTranscription ? 'drum onset classifier' : 'drums off',
     `${result.pipeline.chunks} chunk${result.pipeline.chunks === 1 ? '' : 's'}`,
-  ];
+  ].filter(Boolean);
   el('pipelineList').innerHTML = pipelineSteps.map(step => `<span class="pipeline-chip">${escapeHtml(step)}</span>`).join('');
 
   el('cleanupSummary').innerHTML = `
