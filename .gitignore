@@ -3,3 +3,7 @@ dist/
 .dev.vars
 .wrangler/
 .DS_Store
+.benchmark-cache/
+benchmark-results/
+bench/*.local.json
+bench/local-*.json

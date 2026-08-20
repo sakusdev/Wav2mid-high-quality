@@ -15,11 +15,15 @@ jobs:
           node-version: 22
           package-manager-cache: false
       - run: npm install --no-audit --no-fund
+      - name: Benchmark tooling syntax gate
+        run: npm run test:bench:syntax
       - run: npm run build
       - name: Cloudflare temporary asset gate
         run: npm run check:temporary-assets
       - run: google-chrome --version
       - run: npm run test:e2e
+      - name: Benchmark production-browser smoke
+        run: npm run test:bench:smoke
       - name: Cloudflare deployment readiness
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
