@@ -81,7 +81,7 @@ export function binarizeRegression(matrix, frames, classes, threshold, neighbour
       shifts[index] = Number.isFinite(shift) ? clamp(shift, -1, 1) : 0;
     }
   }
-  return { binary, shifts, frames, classes };
+  return { binary, shifts, frames, classes, source: matrix };
 }
 
 function detectPitchEvents({ pitchClass, frames, frame, velocity, onsetPeaks, offsetPeaks, frameThreshold, maxNoteFrames }) {
