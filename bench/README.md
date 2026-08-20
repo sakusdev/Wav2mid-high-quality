@@ -10,7 +10,7 @@ The evaluator reports:
 - note onset+offset precision / recall / F1, with offset tolerance `max(50 ms, 20% of the reference duration)` by default;
 - frame precision / recall / F1 from exact interval overlap per MIDI pitch;
 - GM drum onset precision / recall / F1 by exact MIDI drum class;
-- a single objective used by the tuner: 55% onset F1 + 20% offset F1 + 25% frame F1, with a 10% drum term when the reference contains drums.
+- a single objective used by the tuner: tonal score = 55% onset F1 + 20% offset F1 + 25% frame F1. A 10% drum term is activated whenever either the reference or prediction contains drums, so hallucinated drums on a drumless piano recording are explicitly penalized.
 
 All adapters use those same metrics. Do not compare a number produced by another repository's evaluator directly with this leaderboard unless the metric definition is identical.
 
@@ -57,6 +57,8 @@ npm run benchmark:suite -- \
 ```
 
 Results are written as both JSON and Markdown under `benchmark-results/`. Command-adapter outputs are cached under `.benchmark-cache/` unless `alwaysRun` is set.
+
+For CI or a controlled experiment, `--min-objective 0.50` can enforce a minimum best-adapter objective. CI itself generates a tiny ground-truth WAV/MIDI fixture and runs the production-browser adapter end to end, so the leaderboard path cannot silently rot while the main app remains green.
 
 ## Auto-tune Wav2mid
 
