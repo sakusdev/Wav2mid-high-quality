@@ -78,6 +78,9 @@ def main() -> int:
     for name in output_names:
         dynamic_axes[name] = {1: "frames"}
 
+    # The legacy exporter is deliberately selected. This network uses conventional
+    # Conv/GRU/Linear ops and dynamic_axes; the newer dynamo exporter adds an
+    # onnxscript dependency without improving the browser graph for this model.
     torch.onnx.export(
         model,
         dummy,
@@ -87,6 +90,7 @@ def main() -> int:
         dynamic_axes=dynamic_axes,
         opset_version=args.opset,
         do_constant_folding=True,
+        dynamo=False,
     )
 
     parity = None
