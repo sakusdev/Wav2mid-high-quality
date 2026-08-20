@@ -12,7 +12,7 @@ permissions:
 jobs:
   deploy-preview:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -55,3 +55,93 @@ jobs:
           echo "### Temporary preview: $preview" >> "$GITHUB_STEP_SUMMARY"
           echo "Temporary preview: $preview"
           rm -f /tmp/wrangler-temporary.log
+
+      - name: Real Android NEURAL HQ remote smoke
+        env:
+          PREVIEW_URL: ${{ steps.deploy.outputs.preview }}
+        run: |
+          google-chrome --version
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import { chromium } from '@playwright/test';
+
+          const preview = process.env.PREVIEW_URL;
+          if (!preview) throw new Error('missing PREVIEW_URL');
+
+          const wavPath = '/tmp/neural-remote-smoke.wav';
+          const sampleRate = 16000;
+          const duration = 0.75;
+          const samples = Math.round(sampleRate * duration);
+          const dataBytes = samples * 2;
+          const wav = Buffer.alloc(44 + dataBytes);
+          let o = 0;
+          const text = value => { wav.write(value, o, 'ascii'); o += value.length; };
+          const u16 = value => { wav.writeUInt16LE(value, o); o += 2; };
+          const u32 = value => { wav.writeUInt32LE(value, o); o += 4; };
+          text('RIFF'); u32(36 + dataBytes); text('WAVE');
+          text('fmt '); u32(16); u16(1); u16(1); u32(sampleRate); u32(sampleRate * 2); u16(2); u16(16);
+          text('data'); u32(dataBytes);
+          for (let i = 0; i < samples; i += 1) {
+            const t = i / sampleRate;
+            const env = Math.min(1, t / 0.02) * Math.min(1, (duration - t) / 0.08);
+            const x = (0.16 * Math.sin(2 * Math.PI * 220 * t)
+              + 0.12 * Math.sin(2 * Math.PI * 329.6276 * t)
+              + 0.10 * Math.sin(2 * Math.PI * 440 * t)) * env;
+            wav.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(x * 32767))), 44 + i * 2);
+          }
+          fs.writeFileSync(wavPath, wav);
+
+          const browser = await chromium.launch({ channel: 'chrome', headless: true });
+          const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Linux; Android 17; Pixel 7a) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Mobile Safari/537.36',
+            viewport: { width: 412, height: 915 },
+          });
+          const page = await context.newPage();
+          page.on('console', msg => console.log(`[page:${msg.type()}] ${msg.text()}`));
+          page.on('pageerror', error => console.error('[pageerror]', error.message));
+          page.on('requestfailed', request => console.error('[requestfailed]', request.url(), request.failure()?.errorText));
+
+          try {
+            await page.goto(preview, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+            const option = page.locator('#neuralOption');
+            await option.waitFor({ state: 'visible' });
+            const optionText = await option.innerText();
+            if (!optionText.includes('7.5s chunks')) throw new Error(`mobile profile not active: ${optionText}`);
+
+            await page.locator('#fileInput').setInputFiles(wavPath);
+            await option.click();
+            if (!(await page.locator('#neuralToggle').isChecked())) throw new Error('NEURAL toggle did not enable');
+
+            const completed = page.locator('#results');
+            const crashPromise = new Promise((_, reject) => {
+              page.once('crash', () => reject(new Error('Chrome renderer crashed during NEURAL HQ')));
+            });
+            const closedPromise = new Promise((_, reject) => {
+              page.once('close', () => reject(new Error('Page closed during NEURAL HQ')));
+            });
+
+            await page.locator('#analyzeBtn').click();
+            await Promise.race([
+              completed.waitFor({ state: 'visible', timeout: 900_000 }),
+              crashPromise,
+              closedPromise,
+            ]);
+
+            const progress = await page.locator('#progressText').innerText();
+            const backend = await page.locator('#pipelineBackend').innerText();
+            const notes = await page.locator('#statNotes').innerText();
+            const drums = await page.locator('#statDrums').innerText();
+            console.log(JSON.stringify({
+              status: 'ok',
+              preview,
+              mobileProfile: optionText.replace(/\s+/g, ' ').trim(),
+              progress,
+              backend,
+              notes,
+              drums,
+            }, null, 2));
+          } finally {
+            await context.close().catch(() => {});
+            await browser.close().catch(() => {});
+          }
+          NODE
