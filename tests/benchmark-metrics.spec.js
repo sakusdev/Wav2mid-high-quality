@@ -42,3 +42,13 @@ test('drum metric requires matching GM drum class', () => {
   const metrics = scoreTranscription(reference, wrongClass);
   expect(metrics.drums.f1).toBe(0);
 });
+
+test('drum hallucinations reduce objective on a drumless reference', () => {
+  const reference = { tonal: [note(60, 0, 1)], drums: [] };
+  const clean = scoreTranscription(reference, { tonal: [note(60, 0, 1)], drums: [] });
+  const hallucinated = scoreTranscription(reference, { tonal: [note(60, 0, 1)], drums: [note(38, 0.5, 0.05)] });
+  expect(clean.objective).toBeCloseTo(1, 8);
+  expect(hallucinated.drums.f1).toBe(0);
+  expect(hallucinated.objective).toBeLessThan(clean.objective);
+  expect(hallucinated.objective).toBeCloseTo(0.9, 8);
+});
