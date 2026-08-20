@@ -6,7 +6,7 @@ import { aggregateScores, readMidiNotes, readPrediction, scoreTranscription } fr
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.manifest || !args.adapters) {
-  console.error('Usage: npm run benchmark:suite -- --manifest bench.json --adapters adapters.json [--adapter wav2mid-insane,muscriptor-small] [--split test] [--max-items 10]');
+  console.error('Usage: npm run benchmark:suite -- --manifest bench.json --adapters adapters.json [--adapter wav2mid-insane,muscriptor-small] [--split test] [--max-items 10] [--min-objective 0.5]');
   process.exit(2);
 }
 
@@ -91,6 +91,18 @@ await fs.writeFile(jsonPath, JSON.stringify(report, null, 2));
 await fs.writeFile(mdPath, renderMarkdown(report));
 console.log(`\nSaved ${jsonPath}`);
 console.log(`Saved ${mdPath}`);
+
+if (args['min-objective'] != null) {
+  const minimum = Number(args['min-objective']);
+  if (!Number.isFinite(minimum) || minimum < 0 || minimum > 1) throw new Error('--min-objective must be between 0 and 1.');
+  const best = Object.entries(report.adapters)
+    .map(([name, value]) => ({ name, objective: Number(value.aggregate?.objective ?? 0) }))
+    .sort((a, b) => b.objective - a.objective)[0];
+  if (!best || best.objective < minimum) {
+    throw new Error(`Benchmark objective gate failed: best=${best?.name ?? 'none'} ${(best?.objective ?? 0).toFixed(4)} < ${minimum.toFixed(4)}`);
+  }
+  console.log(`Objective gate PASS: ${best.name} ${best.objective.toFixed(4)} >= ${minimum.toFixed(4)}`);
+}
 
 async function runAdapter({ adapterName, adapter, browser, audioPath, item, adapterDir, id }) {
   if (adapter.type === 'browser') {
