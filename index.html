@@ -3,19 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#101218" />
-    <meta name="description" content="ブラウザ内で完結する高品質 Audio → MIDI 解析ツール" />
+    <meta name="theme-color" content="#0b0b0c" />
+    <meta name="description" content="ローカルで動く Audio → MIDI 解析ワークベンチ" />
     <link rel="icon" href="/favicon.svg" />
     <title>Wav2mid HQ</title>
   </head>
   <body>
     <main id="app"></main>
     <script>
-      // Math.signbit is still missing in some stable browsers; the drum ZCR path only needs the sign test.
       if (typeof Math.signbit !== 'function') {
         Math.signbit = value => value < 0 || Object.is(value, -0);
       }
     </script>
     <script type="module" src="/src/main.js"></script>
+    <script type="module" src="/src/muscriptor-bridge-ui.js"></script>
   </body>
 </html>
