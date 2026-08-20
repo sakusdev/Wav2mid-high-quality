@@ -1,4 +1,5 @@
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const DEMUCS_INTERNAL_SEGMENT_SECONDS = 343980 / 44100;
 let corePromise = null;
 
 export async function transcribeNeural(audioBuffer, options = {}, onProgress = () => {}) {
@@ -9,7 +10,10 @@ export async function transcribeNeural(audioBuffer, options = {}, onProgress = (
   const duration = Number(audioBuffer?.duration ?? 0);
   if (!Number.isFinite(duration) || duration <= 0) throw new Error('Decoded audio is empty.');
 
-  if (duration <= profile.chunkSeconds + 1) {
+  // Keep the direct path strictly inside one outer chunk. The old +1 second
+  // allowance could push an Android chunk beyond Demucs' fixed ~7.80 s input
+  // window and trigger two expensive separator inferences back-to-back.
+  if (duration <= profile.chunkSeconds) {
     const result = await core.transcribeNeural(audioBuffer, options, onProgress);
     result.pipeline = {
       ...(result.pipeline ?? {}),
@@ -17,6 +21,7 @@ export async function transcribeNeural(audioBuffer, options = {}, onProgress = (
       memoryProfile: profile.name,
       wasmThreadCap: profile.wasmThreads,
       chunkSeconds: profile.chunkSeconds,
+      demucsInternalSegmentSeconds: DEMUCS_INTERNAL_SEGMENT_SECONDS,
     };
     return result;
   }
@@ -76,7 +81,8 @@ export async function transcribeNeural(audioBuffer, options = {}, onProgress = (
     chunkMeta.push({ index, start, end, noteCount: result.notes?.length ?? 0, drumCount: result.drums?.length ?? 0 });
 
     // Release all stem/tensor references from this chunk before the next one.
-    // Yielding gives the browser a chance to reclaim detached ArrayBuffers and GPU/WASM temporaries.
+    // A longer mobile yield gives Chrome/Android more opportunity to reclaim
+    // detached ArrayBuffers and ORT temporaries before starting the next model run.
     await new Promise(resolve => setTimeout(resolve, profile.yieldMs));
   }
 
@@ -114,6 +120,8 @@ export async function transcribeNeural(audioBuffer, options = {}, onProgress = (
       chunkSeconds: profile.chunkSeconds,
       overlapSeconds,
       wasmThreadCap: profile.wasmThreads,
+      demucsInternalSegmentSeconds: DEMUCS_INTERNAL_SEGMENT_SECONDS,
+      singleDemucsSegmentTarget: profile.chunkSeconds <= DEMUCS_INTERNAL_SEGMENT_SECONDS,
       deviceMemoryGiB: Number(navigator?.deviceMemory ?? 0) || null,
       hardwareConcurrency: Number(navigator?.hardwareConcurrency ?? 0) || null,
       chunkMeta,
@@ -146,7 +154,10 @@ function chooseMemoryProfile() {
   const mobile = /Android|iPhone|iPad|Mobile/i.test(globalThis.navigator?.userAgent ?? '');
 
   if (mobile || (deviceMemory > 0 && deviceMemory <= 4)) {
-    return { name: 'MOBILE_SAFE', chunkSeconds: 12, overlapSeconds: 2, wasmThreads: 2, yieldMs: 32 };
+    // Stay below Demucs' fixed 343980/44100 ~= 7.80 s model window so every
+    // outer chunk needs one separator inference instead of two. One WASM worker
+    // trades throughput for substantially lower Android renderer pressure.
+    return { name: 'MOBILE_SAFE', chunkSeconds: 7.5, overlapSeconds: 1, wasmThreads: 1, yieldMs: 64 };
   }
   if ((deviceMemory > 0 && deviceMemory <= 8) || cores <= 6) {
     return { name: 'BALANCED', chunkSeconds: 18, overlapSeconds: 2, wasmThreads: Math.min(3, Math.max(2, Math.floor(cores / 2))), yieldMs: 20 };
