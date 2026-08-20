@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 import process from 'node:process';
 import { chromium } from '@playwright/test';
 
@@ -36,14 +37,16 @@ export class BrowserBenchRunner {
 
   async run(audioPath, config = {}) {
     if (!this.browser) throw new Error('BrowserBenchRunner.start() must be called first.');
-    const page = await this.browser.newPage();
+    const page = await this.browser.newPage({ acceptDownloads: true });
     const timeoutMs = Number(config.timeoutMs ?? 10 * 60_000);
     page.setDefaultTimeout(timeoutMs);
-    await page.addInitScript(() => { window.__WAV2MID_BENCHMARK__ = true; });
 
     try {
       await page.goto(this.baseUrl, { waitUntil: 'domcontentloaded' });
-      await page.waitForFunction(() => document.querySelector('#backendLabel')?.textContent?.includes('backend:') && !document.querySelector('#backendLabel')?.textContent?.includes('loading'));
+      await page.waitForFunction(() => {
+        const text = document.querySelector('#backendLabel')?.textContent ?? '';
+        return text.includes('backend:') && !text.includes('loading');
+      });
 
       const mode = String(config.mode ?? 'pro').toLowerCase();
       if (['fast', 'pro', 'insane'].includes(mode)) await page.locator(`button[data-mode="${mode}"]`).click();
@@ -58,24 +61,25 @@ export class BrowserBenchRunner {
       if (config.minPitch != null) await page.locator('#minPitch').fill(String(config.minPitch));
       if (config.maxPitch != null) await page.locator('#maxPitch').fill(String(config.maxPitch));
 
-      await page.evaluate(advanced => {
-        window.__WAV2MID_BENCH_OPTIONS__ = advanced ?? {};
-        window.__WAV2MID_LAST_RESULT__ = null;
-        window.__WAV2MID_LAST_ERROR__ = null;
-      }, config.advanced ?? {});
-
       await page.locator('#fileInput').setInputFiles(audioPath);
-      await page.locator('#analyzeBtn').waitFor({ state: 'visible' });
       await page.waitForFunction(() => !document.querySelector('#analyzeBtn')?.disabled);
       await page.locator('#analyzeBtn').click();
-      await page.waitForFunction(() => window.__WAV2MID_LAST_RESULT__ || window.__WAV2MID_LAST_ERROR__, null, { timeout: timeoutMs });
+      await page.waitForFunction(() => {
+        const results = document.querySelector('#results');
+        const progress = document.querySelector('#progressText')?.textContent ?? '';
+        return (results && !results.hidden) || progress.startsWith('解析失敗:');
+      }, null, { timeout: timeoutMs });
 
-      const state = await page.evaluate(() => ({
-        result: window.__WAV2MID_LAST_RESULT__ ?? null,
-        error: window.__WAV2MID_LAST_ERROR__ ?? null,
-      }));
-      if (state.error) throw new Error(`Browser transcription failed: ${state.error}`);
-      return state.result;
+      const failure = await page.locator('#progressText').textContent();
+      if (failure?.startsWith('解析失敗:')) throw new Error(failure);
+
+      const [download] = await Promise.all([
+        page.waitForEvent('download'),
+        page.locator('#jsonBtn').click(),
+      ]);
+      const downloadPath = await download.path();
+      if (!downloadPath) throw new Error('Browser did not expose the analysis JSON download path.');
+      return JSON.parse(await fs.readFile(downloadPath, 'utf8'));
     } finally {
       await page.close();
     }
