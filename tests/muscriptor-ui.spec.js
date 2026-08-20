@@ -23,17 +23,7 @@ function makeTinyWav(path) {
   fs.writeFileSync(path, buffer);
 }
 
-function bridgeHeaders(extra = {}) {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': '*',
-    'Access-Control-Allow-Private-Network': 'true',
-    ...extra,
-  };
-}
-
-test('MuScriptor ULTRA is visible, NC-labelled and lazy', async ({ page }) => {
+test('MuScriptor ULTRA is visible, NC-labelled and browser-lazy', async ({ page }) => {
   const requests = [];
   page.on('request', request => requests.push(request.url()));
   await page.goto('http://127.0.0.1:4173');
@@ -41,54 +31,56 @@ test('MuScriptor ULTRA is visible, NC-labelled and lazy', async ({ page }) => {
   const option = page.locator('#ultraOption');
   await expect(option).toContainText('MuScriptor ULTRA');
   await expect(option).toContainText('NC');
+  await expect(option).toContainText('Browser WebGPU');
+  await expect(page.locator('#ultraState')).toHaveText('lazy');
   await expect(page.locator('#ultraConfig')).toBeHidden();
   expect(requests.some(url => /127\.0\.0\.1:8223|localhost:8223/i.test(url))).toBeFalsy();
+  expect(requests.some(url => /muscriptor-small|ort\.all\.min\.js/i.test(url))).toBeFalsy();
 
   await option.click();
   await expect(page.locator('#ultraToggle')).toBeChecked();
   await expect(page.locator('#ultraConfig')).toBeVisible();
-  await expect(page.locator('#muscriptorEndpoint')).toHaveValue('http://127.0.0.1:8223');
+  await expect(page.locator('#ultraConfig')).toContainText('端末内推論');
+  await expect(page.locator('#muscriptorEndpoint')).toHaveCount(0);
   expect(requests.some(url => /127\.0\.0\.1:8223|localhost:8223/i.test(url))).toBeFalsy();
+  expect(requests.some(url => /muscriptor-small|ort\.all\.min\.js/i.test(url))).toBeFalsy();
 });
 
-test('MuScriptor ULTRA consumes bridge SSE and renders the result', async ({ page }, testInfo) => {
+test('MuScriptor ULTRA uses the browser model path and renders the result', async ({ page }, testInfo) => {
   const wavPath = testInfo.outputPath('muscriptor-input.wav');
   makeTinyWav(wavPath);
 
-  const sse = [
-    'data: {"type":"progress","completed":0,"total":1}',
-    '',
-    'data: {"type":"start","pitch":60,"start_time":0.05,"index":1,"instrument":"acoustic_piano"}',
-    '',
-    'data: {"type":"end","end_time":0.25,"start_event_index":1}',
-    '',
-    'data: {"type":"progress","completed":1,"total":1}',
-    '',
-    'data: {"type":"transcription_complete","data":"TVRoZA==","beat_grid":{"bpm":120,"beats_per_bar":4,"first_downbeat":0,"onset_delay":0}}',
-    '',
-    '',
-  ].join('\n');
+  await page.addInitScript(() => {
+    globalThis.__WAV2MID_MUSCRIPTOR_MODEL_LOADER__ = async () => ({
+      transcribe: async (_audioBuffer, _options, onProgress) => {
+        onProgress?.({ stage: 'muscriptor-load', value: 0.1, detail: 'model ready' });
+        onProgress?.({ stage: 'muscriptor-decode', value: 1, detail: '1/1 chunks' });
+        const note = {
+          pitchMidi: 60,
+          startTimeSeconds: 0.05,
+          durationSeconds: 0.2,
+          instrument: 'acoustic_piano',
+          program: 0,
+          confidence: 1,
+          amplitude: 0.8,
+        };
+        return {
+          notes: [note],
+          drums: [],
+          rawNotes: [note],
+          chunks: 1,
+          model: {
+            engine: 'MuScriptor small',
+            architecture: { decoderActivationType: 'float32' },
+          },
+        };
+      },
+    });
+  });
 
-  await page.route('http://127.0.0.1:8223/**', async route => {
-    const request = route.request();
-    const url = new URL(request.url());
-    if (request.method() === 'OPTIONS') {
-      await route.fulfill({ status: 204, headers: bridgeHeaders() });
-      return;
-    }
-    if (url.pathname === '/health') {
-      await route.fulfill({ status: 200, contentType: 'application/json', headers: bridgeHeaders(), body: '{"status":"ok"}' });
-      return;
-    }
-    if (url.pathname === '/transcribe') {
-      await route.fulfill({
-        status: 200,
-        headers: bridgeHeaders({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }),
-        body: sse,
-      });
-      return;
-    }
-    await route.fulfill({ status: 404, headers: bridgeHeaders() });
+  const localhostRequests = [];
+  page.on('request', request => {
+    if (/127\.0\.0\.1:8223|localhost:8223/i.test(request.url())) localhostRequests.push(request.url());
   });
 
   await page.goto('http://127.0.0.1:4173');
@@ -102,8 +94,10 @@ test('MuScriptor ULTRA consumes bridge SSE and renders the result', async ({ pag
   await expect(results).toHaveAttribute('data-engine', 'muscriptor');
   await expect(page.locator('#statNotes')).toHaveText('1');
   await expect(page.locator('#statTempo')).toHaveText('120 BPM');
-  await expect(page.locator('#backendLabel')).toContainText('MUSCRIPTOR');
+  await expect(page.locator('#backendLabel')).toContainText('MUSCRIPTOR · WEBGPU');
   await expect(page.locator('#pipelineList')).toContainText('MuScriptor transformer');
+  await expect(page.locator('#pipelineList')).toContainText('INT4 weight-only decoder');
   await expect(page.locator('#progressText')).toContainText('完了');
   await expect(page.locator('#ultraState')).toHaveText('ready');
+  expect(localhostRequests).toEqual([]);
 });

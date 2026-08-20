@@ -1,11 +1,8 @@
 import './ultra.css';
 
-const DEFAULT_ENDPOINT = 'http://127.0.0.1:8223';
-const CLIENT_ID_KEY = 'wav2mid.muscriptorClientId';
-const ENDPOINT_KEY = 'wav2mid.muscriptorEndpoint';
-
 let currentFile = null;
 let ultraResult = null;
+let modelPromise = null;
 
 initWhenReady();
 
@@ -25,17 +22,12 @@ function initWhenReady() {
       <span class="ultra-check" aria-hidden="true"></span>
       <span class="ultra-copy">
         <strong>MuScriptor ULTRA <span>NC</span></strong>
-        <small>非商用 · localhost bridge · multi-instrument transformer</small>
+        <small>非商用 · Browser WebGPU · multi-instrument transformer</small>
       </span>
-      <span class="ultra-state" id="ultraState">offline</span>
+      <span class="ultra-state" id="ultraState">lazy</span>
     </label>
     <div class="ultra-config" id="ultraConfig" hidden>
-      <label>
-        <span>Bridge</span>
-        <input id="muscriptorEndpoint" type="url" inputmode="url" spellcheck="false" />
-      </label>
-      <button type="button" class="secondary ultra-probe" id="muscriptorProbe">CHECK</button>
-      <p>PCで <code>python tools/muscriptor_bridge.py --model small</code> を実行。モデル重みはCC BY-NC 4.0で、音源はlocalhostから外へ送信しません。</p>
+      <p><strong>端末内推論。</strong> 音源はサーバーへ送信しません。初回解析時だけMuScriptor-smallのモデルを取得し、WebGPUで実行します。モデル重みはCC BY-NC 4.0です。</p>
     </div>
   `;
   neuralOption.after(block);
@@ -43,8 +35,6 @@ function initWhenReady() {
   const ultraToggle = document.getElementById('ultraToggle');
   const ultraOption = document.getElementById('ultraOption');
   const ultraConfig = document.getElementById('ultraConfig');
-  const endpointInput = document.getElementById('muscriptorEndpoint');
-  const probeBtn = document.getElementById('muscriptorProbe');
   const state = document.getElementById('ultraState');
   const neuralToggle = document.getElementById('neuralToggle');
   const qualityGroup = document.getElementById('qualityGroup');
@@ -52,13 +42,6 @@ function initWhenReady() {
   const progressHint = document.getElementById('progressHint');
   const fileInput = document.getElementById('fileInput');
   const dropZone = document.getElementById('dropZone');
-
-  endpointInput.value = localStorage.getItem(ENDPOINT_KEY) || DEFAULT_ENDPOINT;
-  endpointInput.addEventListener('change', () => {
-    endpointInput.value = normalizeEndpoint(endpointInput.value);
-    localStorage.setItem(ENDPOINT_KEY, endpointInput.value);
-    state.textContent = 'unchecked';
-  });
 
   fileInput.addEventListener('change', () => {
     currentFile = fileInput.files?.[0] || null;
@@ -84,22 +67,6 @@ function initWhenReady() {
     }
   });
 
-  probeBtn.addEventListener('click', async () => {
-    probeBtn.disabled = true;
-    state.textContent = 'checking';
-    try {
-      const response = await localFetch(`${endpoint()}/health`, { method: 'GET' });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const info = await response.json();
-      state.textContent = info?.status === 'ok' ? 'ready' : 'online';
-    } catch (error) {
-      state.textContent = 'offline';
-      console.warn('MuScriptor bridge check failed.', error);
-    } finally {
-      probeBtn.disabled = false;
-    }
-  });
-
   analyzeBtn.addEventListener('click', async event => {
     if (!ultraToggle.checked) {
       ultraResult = null;
@@ -114,20 +81,34 @@ function initWhenReady() {
     analyzeBtn.disabled = true;
     ultraResult = null;
     document.getElementById('results').hidden = true;
-    showProgress(0.01, 'MuScriptor bridgeへ接続中…');
+    state.textContent = 'loading';
+    showProgress(0.01, 'MuScriptor WebGPUを準備中…');
 
     const started = performance.now();
+    let audioContext = null;
     try {
-      const parsed = await transcribeWithBridge(file, progress => {
-        if (progress.total > 0) {
-          const ratio = progress.completed / progress.total;
-          showProgress(0.06 + ratio * 0.86, `MuScriptor ${progress.completed} / ${progress.total} chunks`);
+      if (!navigator.gpu && !globalThis.__WAV2MID_MUSCRIPTOR_MODEL_LOADER__) {
+        throw new Error('WebGPUが利用できません。Chromium系ブラウザと対応GPUを使用してください。');
+      }
+
+      const model = await loadBrowserModel();
+      showProgress(0.04, '音声をデコード中…');
+      audioContext = new AudioContext();
+      const audioBytes = await file.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(audioBytes.slice(0));
+      const parsed = await model.transcribe(audioBuffer, {}, progress => {
+        const value = Number(progress?.value);
+        if (Number.isFinite(value)) {
+          const detail = progress?.detail ? ` · ${progress.detail}` : '';
+          showProgress(0.05 + Math.max(0, Math.min(1, value)) * 0.93, `MuScriptor WebGPU${detail}`);
         }
       });
+
+      const tempo = estimateTempo(parsed.notes || []);
       ultraResult = {
         ...parsed,
         file,
-        endpoint: endpoint(),
+        tempo,
         elapsedSeconds: (performance.now() - started) / 1000,
       };
       renderUltraResult(ultraResult);
@@ -137,17 +118,18 @@ function initWhenReady() {
       console.error(error);
       state.textContent = 'error';
       showProgress(0, `MuScriptor失敗: ${error?.message || error}`);
-      progressHint.textContent = 'localhost bridge、Hugging Face認証、ブラウザのローカルネットワーク権限を確認してください。';
+      progressHint.textContent = 'WebGPU、GPUメモリ、モデル配信先への接続を確認してください。音源自体は外部へ送信されません。';
     } finally {
+      if (audioContext) await audioContext.close().catch(() => {});
       analyzeBtn.disabled = false;
     }
   }, true);
 
-  document.getElementById('midiBtn')?.addEventListener('click', event => {
+  document.getElementById('midiBtn')?.addEventListener('click', async event => {
     if (!ultraResult || document.getElementById('results')?.dataset.engine !== 'muscriptor') return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    downloadBlob(new Blob([ultraResult.midiBytes], { type: 'audio/midi' }), `${basename(ultraResult.file.name)}.muscriptor.mid`);
+    await downloadUltraMidi(ultraResult);
   }, true);
 
   document.getElementById('jsonBtn')?.addEventListener('click', event => {
@@ -155,20 +137,17 @@ function initWhenReady() {
     event.preventDefault();
     event.stopImmediatePropagation();
     const payload = {
-      format: 'wav2mid-muscriptor-bridge/v1',
-      engine: 'MuScriptor',
+      format: 'wav2mid-muscriptor-browser/v1',
+      engine: 'MuScriptor small',
+      backend: 'WebGPU',
       license: 'CC BY-NC 4.0 model weights',
-      endpoint: ultraResult.endpoint,
-      beatGrid: ultraResult.beatGrid,
+      tempo: ultraResult.tempo,
+      model: ultraResult.model,
       notes: ultraResult.notes,
       drums: ultraResult.drums,
     };
     downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), `${basename(ultraResult.file.name)}.muscriptor.json`);
   }, true);
-
-  function endpoint() {
-    return normalizeEndpoint(endpointInput.value || DEFAULT_ENDPOINT);
-  }
 
   function updateUltraUi() {
     const active = ultraToggle.checked;
@@ -176,86 +155,68 @@ function initWhenReady() {
     ultraConfig.hidden = !active;
     qualityGroup?.classList.toggle('disabled', active || Boolean(neuralToggle?.checked));
     if (active) {
-      modeNote.textContent = 'MuScriptor transformer · multi-instrument · 非商用。推論はlocalhost bridgeで実行。';
-      progressHint.textContent = 'MuScriptor ULTRAはPC上のlocalhost bridgeへ音源を渡します。外部サーバーへは送信しません。';
+      modeNote.textContent = 'MuScriptor transformer · multi-instrument · 非商用 · Browser WebGPU。';
+      progressHint.textContent = '初回解析時にモデルを取得します。音源はブラウザ内だけで処理され、外部サーバーへ送信されません。';
     }
   }
 }
 
-async function transcribeWithBridge(file, onProgress) {
-  const starts = new Map();
-  const rawNotes = [];
-  const form = new FormData();
-  form.append('file', file, file.name);
-  form.append('detect_tempo', 'best-effort');
-
-  const response = await localFetch(`${normalizeEndpoint(localStorage.getItem(ENDPOINT_KEY) || DEFAULT_ENDPOINT)}/transcribe`, {
-    method: 'POST',
-    body: form,
-    headers: { 'X-Client-ID': clientId() },
-  });
-  if (!response.ok) {
-    let detail = '';
-    try { detail = (await response.json())?.detail || ''; } catch {}
-    throw new Error(detail || `bridge HTTP ${response.status}`);
-  }
-  if (!response.body) throw new Error('bridge response has no readable stream');
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let midiBytes = null;
-  let beatGrid = null;
-
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    buffer = buffer.replace(/\r\n/g, '\n');
-    let boundary;
-    while ((boundary = buffer.indexOf('\n\n')) >= 0) {
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      for (const line of block.split('\n')) {
-        if (!line.startsWith('data:')) continue;
-        const payload = JSON.parse(line.slice(5).trim());
-        if (payload.type === 'start') {
-          starts.set(Number(payload.index), payload);
-        } else if (payload.type === 'end') {
-          const start = starts.get(Number(payload.start_event_index));
-          if (!start) continue;
-          rawNotes.push({
-            pitchMidi: Number(start.pitch),
-            startTimeSeconds: Number(start.start_time),
-            durationSeconds: Math.max(0.001, Number(payload.end_time) - Number(start.start_time)),
-            instrument: String(start.instrument || 'unknown'),
-          });
-          starts.delete(Number(payload.start_event_index));
-        } else if (payload.type === 'progress') {
-          onProgress?.({ completed: Number(payload.completed || 0), total: Number(payload.total || 0) });
-        } else if (payload.type === 'transcription_complete') {
-          midiBytes = base64ToBytes(payload.data);
-          beatGrid = payload.beat_grid || null;
-        }
+async function loadBrowserModel() {
+  if (!modelPromise) {
+    modelPromise = (async () => {
+      if (globalThis.__WAV2MID_MUSCRIPTOR_MODEL_LOADER__) {
+        return globalThis.__WAV2MID_MUSCRIPTOR_MODEL_LOADER__();
       }
-    }
-    if (done) break;
+      const { loadMuScriptorBrowserModel } = await import('./muscriptor-browser-core.js');
+      return loadMuScriptorBrowserModel();
+    })().catch(error => {
+      modelPromise = null;
+      throw error;
+    });
+  }
+  return modelPromise;
+}
+
+async function downloadUltraMidi(data) {
+  const { Midi } = await import('@tonejs/midi');
+  const midi = new Midi();
+  midi.header.setTempo(Number.isFinite(data.tempo) ? data.tempo : 120);
+
+  const tracks = new Map();
+  const ensureTrack = program => {
+    if (tracks.has(program)) return tracks.get(program);
+    const track = midi.addTrack();
+    track.name = programName(program);
+    track.instrument.number = Math.max(0, Math.min(127, program));
+    tracks.set(program, track);
+    return track;
+  };
+
+  for (const note of data.notes || []) {
+    const program = Number.isFinite(note.program) ? note.program : 0;
+    ensureTrack(program).addNote({
+      midi: note.pitchMidi,
+      time: note.startTimeSeconds,
+      duration: Math.max(0.01, note.durationSeconds),
+      velocity: Math.max(0.01, Math.min(1, note.amplitude ?? note.confidence ?? 0.8)),
+    });
   }
 
-  if (!midiBytes) throw new Error('bridge finished without MIDI data');
-  const onsetDelay = Number(beatGrid?.onset_delay || 0);
-  const normalized = rawNotes.map(note => ({
-    ...note,
-    startTimeSeconds: Math.max(0, note.startTimeSeconds - onsetDelay),
-  }));
-  const drums = normalized.filter(note => isDrum(note.instrument)).map(note => ({
-    midi: note.pitchMidi,
-    name: note.instrument,
-    time: note.startTimeSeconds,
-    duration: note.durationSeconds,
-    velocity: 0.8,
-  }));
-  const notes = normalized.filter(note => !isDrum(note.instrument));
-  return { notes, drums, rawNotes: normalized, midiBytes, beatGrid };
+  if ((data.drums || []).length) {
+    const drumTrack = midi.addTrack();
+    drumTrack.name = 'Drums';
+    drumTrack.channel = 9;
+    for (const drum of data.drums) {
+      drumTrack.addNote({
+        midi: drum.midi,
+        time: drum.time,
+        duration: Math.max(0.01, drum.duration || 0.05),
+        velocity: Math.max(0.01, Math.min(1, drum.velocity ?? 0.8)),
+      });
+    }
+  }
+
+  downloadBlob(new Blob([midi.toArray()], { type: 'audio/midi' }), `${basename(data.file.name)}.muscriptor.mid`);
 }
 
 function renderUltraResult(data) {
@@ -265,33 +226,35 @@ function renderUltraResult(data) {
   document.getElementById('resultTitle').textContent = data.file.name;
   document.getElementById('statNotes').textContent = data.notes.length.toLocaleString();
   document.getElementById('statDrums').textContent = data.drums.length.toLocaleString();
-  document.getElementById('statTempo').textContent = data.beatGrid?.bpm ? `${Math.round(data.beatGrid.bpm)} BPM` : '—';
+  document.getElementById('statTempo').textContent = Number.isFinite(data.tempo) ? `${Math.round(data.tempo)} BPM` : '—';
   document.getElementById('statKey').textContent = '—';
   document.getElementById('statPoly').textContent = maxPolyphony(data.notes);
   document.getElementById('statEnsemble').textContent = 'NC';
   const pitches = data.notes.map(note => note.pitchMidi);
   document.getElementById('statRange').textContent = pitches.length ? `${midiName(Math.min(...pitches))} – ${midiName(Math.max(...pitches))}` : '—';
   document.getElementById('rollLegend').textContent = `MuScriptor ULTRA (NC) · ${data.elapsedSeconds.toFixed(1)} sec processing`;
-  document.getElementById('pipelineBackend').textContent = `LOCAL · ${data.endpoint}`;
+  document.getElementById('pipelineBackend').textContent = 'WEBGPU · DEVICE';
+  const activation = data.model?.architecture?.decoderActivationType || data.model?.architecture?.activationType || 'unknown';
   document.getElementById('pipelineList').innerHTML = [
     'MuScriptor transformer',
     '5 s autoregressive chunks',
     'instrument-aware MIDI',
-    'localhost bridge',
+    `WebGPU · ${activation}`,
+    'INT4 weight-only decoder',
     'CC BY-NC 4.0 weights',
   ].map(text => `<span class="pipeline-chip">${escapeHtml(text)}</span>`).join('');
 
-  const instruments = [...new Set(data.rawNotes.map(note => note.instrument))].sort();
+  const instruments = [...new Set((data.rawNotes || []).map(note => note.instrument))].sort();
   document.getElementById('cleanupSummary').innerHTML = `
     <div><span>Tonal notes</span><strong>${data.notes.length.toLocaleString()}</strong></div>
     <div><span>Drum events</span><strong>${data.drums.length.toLocaleString()}</strong></div>
     <div><span>Instruments</span><strong>${instruments.length}</strong></div>
-    <div><span>Tempo grid</span><strong>${data.beatGrid?.bpm ? 'detected' : 'none'}</strong></div>
+    <div><span>Chunks</span><strong>${Number(data.chunks || 0).toLocaleString()}</strong></div>
     <div><span>Engine</span><strong>MuScriptor</strong></div>
-    <div><span>License</span><strong>NC</strong></div>
+    <div><span>Backend</span><strong>WebGPU</strong></div>
   `;
-  document.getElementById('chordList').innerHTML = '<p class="muted">MuScriptor bridge mode does not emit chord labels.</p>';
-  document.getElementById('backendLabel').textContent = 'backend: MUSCRIPTOR';
+  document.getElementById('chordList').innerHTML = '<p class="muted">MuScriptor browser mode does not emit chord labels.</p>';
+  document.getElementById('backendLabel').textContent = 'backend: MUSCRIPTOR · WEBGPU';
   drawPianoRoll(data.notes, data.file);
   requestAnimationFrame(() => results.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
@@ -332,6 +295,29 @@ function drawPianoRoll(notes, file) {
   canvas.dataset.source = file.name;
 }
 
+function estimateTempo(notes) {
+  if (!notes || notes.length < 4) return 120;
+  const onsets = [...new Set(notes
+    .map(note => Math.round(Number(note.startTimeSeconds) * 100) / 100)
+    .filter(Number.isFinite))]
+    .sort((a, b) => a - b)
+    .slice(0, 600);
+  const votes = new Map();
+  for (let i = 0; i < onsets.length; i += 1) {
+    for (let j = i + 1; j < Math.min(onsets.length, i + 8); j += 1) {
+      const dt = onsets[j] - onsets[i];
+      if (dt < 0.18 || dt > 2) continue;
+      let bpm = 60 / dt;
+      while (bpm < 70) bpm *= 2;
+      while (bpm > 180) bpm /= 2;
+      const rounded = Math.round(bpm);
+      votes.set(rounded, (votes.get(rounded) || 0) + 1 / (j - i));
+    }
+  }
+  if (!votes.size) return 120;
+  return [...votes.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
 function showProgress(value, text) {
   const pct = Math.max(0, Math.min(100, Math.round(value * 100)));
   document.getElementById('progressPanel').hidden = false;
@@ -343,41 +329,6 @@ function showProgress(value, text) {
 function clearUltraResult() {
   ultraResult = null;
   document.getElementById('results')?.removeAttribute('data-engine');
-}
-
-function localFetch(url, init = {}) {
-  const options = { mode: 'cors', ...init };
-  if (/^http:\/\/(?:127(?:\.\d+){3}|localhost|\[::1\])(?::\d+)?(?:\/|$)/i.test(url)) {
-    options.targetAddressSpace = 'loopback';
-  }
-  return fetch(url, options);
-}
-
-function normalizeEndpoint(value) {
-  const fallback = DEFAULT_ENDPOINT;
-  try {
-    const url = new URL(String(value || fallback));
-    if (!['http:', 'https:'].includes(url.protocol)) return fallback;
-    return url.href.replace(/\/$/, '');
-  } catch {
-    return fallback;
-  }
-}
-
-function clientId() {
-  let id = localStorage.getItem(CLIENT_ID_KEY);
-  if (!id) {
-    id = globalThis.crypto?.randomUUID?.() || `wav2mid-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    localStorage.setItem(CLIENT_ID_KEY, id);
-  }
-  return id;
-}
-
-function base64ToBytes(value) {
-  const binary = atob(String(value || ''));
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes;
 }
 
 function maxPolyphony(notes) {
@@ -396,8 +347,8 @@ function maxPolyphony(notes) {
   return maximum;
 }
 
-function isDrum(instrument) {
-  return /drum|percussion|cymbal|hi.?hat|kick|snare/i.test(String(instrument || ''));
+function programName(program) {
+  return `MuScriptor · Program ${program}`;
 }
 
 function midiName(midi) {

@@ -7,7 +7,10 @@ export default defineConfig({
   reporter: [['list']],
   use: { baseURL: 'http://127.0.0.1:4173', headless: true, acceptDownloads: true },
   webServer: {
-    command: 'npm run preview -- --host 127.0.0.1 --port 4173',
+    // Source-level browser tests import /src modules directly. The CI workflow
+    // already runs a production Vite build and static-asset gates before E2E,
+    // so serve E2E through Vite dev mode where those source module URLs exist.
+    command: 'npm run dev -- --host 127.0.0.1 --port 4173',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: false,
     timeout: 30_000,
