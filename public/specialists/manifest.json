@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "description": "Browser specialist registry. Only benchmark-promoted models should set promoted=true.",
+  "models": {}
+}
