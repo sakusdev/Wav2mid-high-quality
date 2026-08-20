@@ -1,0 +1,57 @@
+name: Authorized temporary preview
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/temporary-preview.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build and enforce temporary asset limit
+        run: |
+          npm run build
+          npm run check:temporary-assets
+      - name: Deploy temporary Worker without exposing claim URL
+        id: deploy
+        env:
+          CI: 'true'
+          WRANGLER_SEND_METRICS: 'false'
+        shell: bash
+        run: |
+          set +e
+          npx wrangler deploy --temporary > /tmp/wrangler-temporary.log 2>&1
+          status=$?
+          set -e
+
+          if [[ $status -ne 0 ]]; then
+            echo 'Temporary deploy failed. Sanitized Wrangler output:'
+            sed -E 's#https://[^[:space:]]+#<redacted-url>#g' /tmp/wrangler-temporary.log | tail -80
+            rm -f /tmp/wrangler-temporary.log
+            exit "$status"
+          fi
+
+          preview=$(grep -Eo 'https://[A-Za-z0-9._-]+\.workers\.dev' /tmp/wrangler-temporary.log | tail -1 || true)
+          if [[ -z "$preview" ]]; then
+            echo 'Temporary deploy succeeded but no workers.dev preview URL was found. Wrangler URLs remain redacted.'
+            rm -f /tmp/wrangler-temporary.log
+            exit 1
+          fi
+
+          echo "preview=$preview" >> "$GITHUB_OUTPUT"
+          echo "### Temporary preview: $preview" >> "$GITHUB_STEP_SUMMARY"
+          echo "Temporary preview: $preview"
+          rm -f /tmp/wrangler-temporary.log
