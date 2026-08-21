@@ -38,6 +38,6 @@
   "devDependencies": {
     "@playwright/test": "1.62.1",
     "vite": "5.4.14",
-    "wrangler": "4.121.0"
+    "wrangler": "4.125.0"
   }
 }

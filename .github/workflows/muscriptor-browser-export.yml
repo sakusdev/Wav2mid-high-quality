@@ -1,0 +1,162 @@
+name: MuScriptor browser export
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/muscriptor-browser-export.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install exporter dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install \
+            'git+https://github.com/muscriptor/muscriptor.git' \
+            huggingface_hub onnx onnxruntime onnxconverter-common onnx-ir
+      - name: Fetch non-commercial MuScriptor small weights
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+
+          out = Path('.muscriptor-source')
+          out.mkdir(exist_ok=True)
+          token = os.environ.get('HF_TOKEN') or None
+          repo = 'MuScriptor/muscriptor-small' if token else 'cocktailpeanut/muscriptor-small'
+          print(f'weight source: {repo}')
+          try:
+              model = hf_hub_download(repo_id=repo, filename='model.safetensors', token=token)
+          except Exception:
+              if repo == 'cocktailpeanut/muscriptor-small':
+                  raise
+              repo = 'cocktailpeanut/muscriptor-small'
+              print(f'official gated download unavailable; fallback source: {repo}')
+              model = hf_hub_download(repo_id=repo, filename='model.safetensors')
+
+          target = out / 'model.safetensors'
+          target.symlink_to(Path(model).resolve())
+          (out / 'config.json').write_text(json.dumps({
+              'dim': 768, 'num_heads': 12, 'num_layers': 14, 'card': 1393
+          }))
+          (out / 'SOURCE.txt').write_text(repo + '\n')
+          print(target, target.stat().st_size)
+          PY
+      - name: Export and validate browser graphs
+        run: |
+          python tools/export_muscriptor_browser_v3.py \
+            --weights .muscriptor-source/model.safetensors \
+            --output .muscriptor-browser \
+            --source "$(cat .muscriptor-source/SOURCE.txt)"
+      - name: Execute final conditioner to INT4 decoder CPU smoke
+        run: python tools/smoke_muscriptor_int4.py .muscriptor-browser
+      - name: Inspect output
+        run: |
+          ls -lh .muscriptor-browser
+          cat .muscriptor-browser/manifest.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install browser and Wrangler dependencies
+        run: |
+          npm install --no-audit --no-fund
+          npx wrangler --version
+
+      - name: Stage Cloudflare-safe model chunks
+        run: |
+          rm -rf public/models/muscriptor-small
+          python tools/stage_muscriptor_cloudflare.py \
+            .muscriptor-browser public/models/muscriptor-small --chunk-mib 4.5
+          find public/models/muscriptor-small -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+          npm run build
+          npm run check:temporary-assets
+          npx wrangler deploy --dry-run
+
+      - name: Verify Worker reconstructs exact decoder bytes
+        run: |
+          npx wrangler dev --local --host 127.0.0.1 --port 8787 > /tmp/muscriptor-wrangler.log 2>&1 &
+          echo $! > /tmp/muscriptor-wrangler.pid
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8787/ >/dev/null; then break; fi
+            sleep 1
+          done
+          if ! curl -fsS http://127.0.0.1:8787/ >/dev/null; then
+            cat /tmp/muscriptor-wrangler.log
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import crypto from 'node:crypto';
+          const manifest = JSON.parse(fs.readFileSync('.muscriptor-browser/manifest.json', 'utf8'));
+          const decoder = manifest.files.decoder;
+          const response = await fetch(`http://127.0.0.1:8787${decoder.url}`);
+          if (!response.ok || !response.body) throw new Error(`decoder HTTP ${response.status}`);
+          const hash = crypto.createHash('sha256');
+          let bytes = 0;
+          for await (const chunk of response.body) {
+            hash.update(chunk);
+            bytes += chunk.length;
+          }
+          const digest = hash.digest('hex');
+          if (bytes !== decoder.bytes) throw new Error(`decoder byte count ${bytes} != ${decoder.bytes}`);
+          if (digest !== decoder.sha256) throw new Error(`decoder sha256 ${digest} != ${decoder.sha256}`);
+          console.log(JSON.stringify({ status: 'ok', bytes, sha256: digest }, null, 2));
+          NODE
+      - name: Stop local Wrangler
+        if: always()
+        run: |
+          if [ -f /tmp/muscriptor-wrangler.pid ]; then kill "$(cat /tmp/muscriptor-wrangler.pid)" || true; fi
+
+      - name: Stage full exported models for local WebGPU smoke
+        run: |
+          rm -rf public/models/muscriptor-small
+          mkdir -p public/models/muscriptor-small
+          cp .muscriptor-browser/manifest.json public/models/muscriptor-small/
+          cp .muscriptor-browser/*.onnx public/models/muscriptor-small/
+          ls -lh public/models/muscriptor-small
+      - name: Start isolated Vite server
+        run: |
+          npm run dev -- --host 127.0.0.1 --port 4173 > /tmp/muscriptor-vite.log 2>&1 &
+          echo $! > /tmp/muscriptor-vite.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:4173/ >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/muscriptor-vite.log
+          exit 1
+      - name: Chrome WebGPU final-model smoke (skip only when adapter unavailable)
+        run: |
+          google-chrome --version
+          if ! node scripts/muscriptor-webgpu-smoke.mjs; then
+            echo '--- Vite log ---'
+            cat /tmp/muscriptor-vite.log || true
+            exit 1
+          fi
+      - name: Stop Vite server
+        if: always()
+        run: |
+          if [ -f /tmp/muscriptor-vite.pid ]; then kill "$(cat /tmp/muscriptor-vite.pid)" || true; fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: muscriptor-browser-v1
+          path: .muscriptor-browser/
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: true
