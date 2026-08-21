@@ -1,0 +1,173 @@
+name: Apply drum spectral gate
+
+on:
+  push:
+    branches: [fix/drum-hallucination]
+    paths:
+      - .github/workflows/apply-drum-spectral-gate.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/drum-hallucination
+      - name: Apply candidate-only spectral evidence gate
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/transcribe.js')
+          text = path.read_text()
+          anchor = "import { createSourceStems } from './separation.js';\n"
+          if "import FFT from 'fft.js';" not in text:
+              if text.count(anchor) != 1:
+                  raise SystemExit('source-stem import anchor changed')
+              text = text.replace(anchor, anchor + "import FFT from 'fft.js';\n")
+
+          start = text.index('export function detectDrumEvents(percussive, sampleRate) {')
+          end = text.index('\nfunction dedupeDrums(drums) {', start)
+          replacement = r'''export function detectDrumEvents(percussive, sampleRate) {
+            if (!percussive?.length) return [];
+            const low = onePoleLowPass(percussive, sampleRate, 180);
+            const high = onePoleHighPass(percussive, sampleRate, 2600);
+            const frameSize = 1024;
+            const hop = 256;
+            const frames = [];
+            let previousRms = 0;
+            for (let start = 0; start + frameSize <= percussive.length; start += hop) {
+              let energy = 0;
+              let lowEnergy = 0;
+              let highEnergy = 0;
+              let crossings = 0;
+              for (let i = 0; i < frameSize; i += 1) {
+                const x = percussive[start + i];
+                energy += x * x;
+                lowEnergy += low[start + i] * low[start + i];
+                highEnergy += high[start + i] * high[start + i];
+                if (i > 0 && Math.signbit(x) !== Math.signbit(percussive[start + i - 1])) crossings += 1;
+              }
+              const rms = Math.sqrt(energy / frameSize);
+              const onset = Math.max(0, rms - previousRms * 0.86);
+              frames.push({ start, rms, onset, low: Math.sqrt(lowEnergy / frameSize), high: Math.sqrt(highEnergy / frameSize), zcr: crossings / frameSize });
+              previousRms = rms;
+            }
+            if (!frames.length) return [];
+            const strengths = frames.map(frame => frame.onset).sort((a, b) => a - b);
+            const p75 = strengths[Math.floor(strengths.length * 0.75)] ?? 0;
+            const mean = strengths.reduce((sum, x) => sum + x, 0) / strengths.length;
+            const threshold = Math.max(0.004, p75 * 1.45, mean * 1.8);
+            const maxStrength = Math.max(threshold, ...strengths);
+            const drums = [];
+            let lastTime = -1;
+
+            for (let i = 1; i < frames.length - 1; i += 1) {
+              const frame = frames[i];
+              if (frame.onset < threshold || frame.onset < frames[i - 1].onset || frame.onset < frames[i + 1].onset) continue;
+              const time = frame.start / sampleRate;
+              if (time - lastTime < 0.055) continue;
+              const lowRatio = frame.low / Math.max(1e-6, frame.rms);
+              const highRatio = frame.high / Math.max(1e-6, frame.rms);
+              let midi = 38;
+              let name = 'Snare';
+              if (lowRatio > 0.62) {
+                midi = 36;
+                name = 'Kick';
+              } else if (highRatio > 0.52 || frame.zcr > 0.24) {
+                midi = 42;
+                name = 'Hi-hat';
+              } else {
+                // HPSS can strip most high-frequency content from a real drum hit,
+                // so a single high-band threshold loses hats/snares. Conversely,
+                // piano/guitar attacks can leak strongly into the percussive stem.
+                // Keep fallback percussion only when at least one independent
+                // transient/noise cue supports it.
+                const lowHeavyTransient = lowRatio >= 0.53 && frame.onset >= threshold * 1.45;
+                const highZcrTransient = frame.zcr >= 0.15;
+                let supported = lowHeavyTransient || highZcrTransient;
+                if (!supported) {
+                  const spectral = drumSpectralEvidence(percussive, frame.start, sampleRate, frameSize);
+                  const noiseLike = spectral.flatness >= 0.18;
+                  const strongBroadTransient = spectral.flatness >= 0.08
+                    && spectral.periodicity <= 0.45
+                    && frame.onset >= threshold * 1.8;
+                  supported = noiseLike || strongBroadTransient;
+                }
+                if (!supported) continue;
+              }
+              const velocity = clamp(0.3 + 0.7 * (frame.onset / maxStrength), 0.12, 1);
+              drums.push({ midi, name, time, duration: 0.055, velocity });
+              lastTime = time;
+            }
+            return drums;
+          }
+
+          function drumSpectralEvidence(samples, start, sampleRate, frameSize) {
+            const fft = new FFT(frameSize);
+            const input = new Array(frameSize).fill(0);
+            const centered = new Float32Array(frameSize);
+            let mean = 0;
+            for (let i = 0; i < frameSize; i += 1) {
+              const value = samples[start + i] ?? 0;
+              centered[i] = value;
+              mean += value;
+              input[i] = value * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (frameSize - 1)));
+            }
+            mean /= frameSize;
+            for (let i = 0; i < frameSize; i += 1) centered[i] -= mean;
+
+            const spectrum = fft.createComplexArray();
+            fft.realTransform(spectrum, input);
+            const firstBin = Math.max(1, Math.ceil((70 * frameSize) / sampleRate));
+            const lastBin = Math.min(frameSize / 2, Math.floor((8000 * frameSize) / sampleRate));
+            let magnitudeSum = 0;
+            let logMagnitudeSum = 0;
+            let binCount = 0;
+            for (let bin = firstBin; bin <= lastBin; bin += 1) {
+              const magnitude = Math.hypot(spectrum[bin * 2], spectrum[bin * 2 + 1]);
+              magnitudeSum += magnitude;
+              logMagnitudeSum += Math.log(magnitude + 1e-9);
+              binCount += 1;
+            }
+            const arithmeticMean = magnitudeSum / Math.max(1, binCount);
+            const flatness = Math.exp(logMagnitudeSum / Math.max(1, binCount)) / Math.max(1e-12, arithmeticMean);
+
+            const minLag = Math.max(1, Math.floor(sampleRate / 1800));
+            const maxLag = Math.min(frameSize - 2, Math.floor(sampleRate / 70));
+            let periodicity = 0;
+            for (let lag = minLag; lag <= maxLag; lag += 2) {
+              let dot = 0;
+              let energyA = 0;
+              let energyB = 0;
+              for (let i = 0; i < frameSize - lag; i += 1) {
+                const a = centered[i];
+                const b = centered[i + lag];
+                dot += a * b;
+                energyA += a * a;
+                energyB += b * b;
+              }
+              const correlation = dot / Math.max(1e-12, Math.sqrt(energyA * energyB));
+              if (correlation > periodicity) periodicity = correlation;
+            }
+            return { flatness, periodicity };
+          }
+          '''
+          text = text[:start] + replacement + text[end:]
+          path.write_text(text)
+          PY
+          node --check src/transcribe.js
+          git diff --check
+          git diff -- src/transcribe.js
+      - name: Commit spectral gate
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/transcribe.js
+          git commit -m 'use spectral evidence for fallback drums'
+          git push origin HEAD:fix/drum-hallucination
