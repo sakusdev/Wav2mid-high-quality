@@ -474,7 +474,7 @@ function contextCorrect(notes, chords, keyDetail, mode) {
   return result;
 }
 
-function detectDrumEvents(percussive, sampleRate) {
+export function detectDrumEvents(percussive, sampleRate) {
   if (!percussive?.length) return [];
   const low = onePoleLowPass(percussive, sampleRate, 180);
   const high = onePoleHighPass(percussive, sampleRate, 2600);
@@ -517,8 +517,17 @@ function detectDrumEvents(percussive, sampleRate) {
     const highRatio = frame.high / Math.max(1e-6, frame.rms);
     let midi = 38;
     let name = 'Snare';
-    if (lowRatio > 0.62) { midi = 36; name = 'Kick'; }
-    else if (highRatio > 0.52 || frame.zcr > 0.24) { midi = 42; name = 'Hi-hat'; }
+    if (lowRatio > 0.62) {
+      midi = 36;
+      name = 'Kick';
+    } else if (highRatio > 0.52 || frame.zcr > 0.24) {
+      midi = 42;
+      name = 'Hi-hat';
+    } else if (highRatio < 0.34 && frame.zcr < 0.075) {
+      // Pitched attacks (especially piano/guitar) leak into an HPSS percussive
+      // stem but usually lack the broadband/high-ZCR evidence of a snare.
+      continue;
+    }
     const velocity = clamp(0.3 + 0.7 * (frame.onset / maxStrength), 0.12, 1);
     drums.push({ midi, name, time, duration: 0.055, velocity });
     lastTime = time;
