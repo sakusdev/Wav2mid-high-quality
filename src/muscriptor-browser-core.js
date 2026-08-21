@@ -376,23 +376,38 @@ class BrowserMuScriptor {
   async condition(mel, instrumentIds) {
     const logMel = new ort.Tensor('float32', mel.data, mel.dims);
     const ids = new ort.Tensor('int64', BigInt64Array.from(instrumentIds, BigInt), [1, instrumentIds.length]);
-    const outputs = await this.conditioner.run({ log_mel: logMel, instrument_embed_ids: ids });
-    return outputs.prefix_embeddings;
+    try {
+      const outputs = await this.conditioner.run({ log_mel: logMel, instrument_embed_ids: ids });
+      return outputs.prefix_embeddings;
+    } finally {
+      logMel.dispose?.();
+      ids.dispose?.();
+    }
   }
 
   async generateChunk(prefix, prompt, forbidden, tracker, openEvents, notes, drums) {
     const caches = this.createCaches();
+    let step = null;
     try {
       const firstTokens = BigInt64Array.from([MUSCRIPTOR_INITIAL_TOKEN, ...prompt], BigInt);
+      const prefixLength = prefix.dims[1];
       let pastLen = 0;
-      let step = await this.runDecoder(prefix, firstTokens, pastLen, caches);
-      pastLen += prefix.dims[1] + firstTokens.length;
-      prefix.dispose?.();
+      try {
+        step = await this.runDecoder(prefix, firstTokens, pastLen, caches);
+      } finally {
+        prefix.dispose?.();
+      }
+      pastLen += prefixLength + firstTokens.length;
 
       for (let generated = 0; generated < MUSCRIPTOR_MAX_GENERATION; generated += 1) {
-        const token = argmax(step.logits.data, forbidden);
-        await this.appendNewKv(step, caches, pastLen - step.queryLength);
-        step.dispose();
+        let token;
+        try {
+          token = argmax(step.logits.data, forbidden);
+          await this.appendNewKv(step, caches, pastLen - step.queryLength);
+        } finally {
+          step.dispose();
+          step = null;
+        }
         if (token === MUSCRIPTOR_EOS) return;
         consumeActions(tracker.feed(token), openEvents, notes, drums);
         const emptyData = this.decoderActivationType === 'float32'
@@ -403,12 +418,17 @@ class BrowserMuScriptor {
           emptyData,
           [1, 0, this.manifest.architecture.dim],
         );
-        step = await this.runDecoder(emptyPrefix, BigInt64Array.of(BigInt(token)), pastLen, caches);
+        try {
+          step = await this.runDecoder(emptyPrefix, BigInt64Array.of(BigInt(token)), pastLen, caches);
+        } finally {
+          emptyPrefix.dispose?.();
+        }
         pastLen += 1;
         if (pastLen >= this.maxCache - 1) throw new Error('MuScriptor KV cache limit reached before EOS.');
       }
       throw new Error(`MuScriptor chunk did not emit EOS within ${MUSCRIPTOR_MAX_GENERATION} tokens.`);
     } finally {
+      step?.dispose();
       for (const cache of caches) {
         cache.tensor.dispose?.();
         cache.buffer.destroy();
@@ -435,18 +455,25 @@ class BrowserMuScriptor {
 
   async runDecoder(prefix, tokenData, pastLen, caches) {
     const tokenIds = tokenData instanceof BigInt64Array ? tokenData : BigInt64Array.from(tokenData, BigInt);
+    const tokenIdsTensor = new ort.Tensor('int64', tokenIds, [1, tokenIds.length]);
+    const pastLenTensor = new ort.Tensor('int64', BigInt64Array.of(BigInt(pastLen)), []);
     const feeds = {
       prefix_embeddings: prefix,
-      token_ids: new ort.Tensor('int64', tokenIds, [1, tokenIds.length]),
-      past_len: new ort.Tensor('int64', BigInt64Array.of(BigInt(pastLen)), []),
+      token_ids: tokenIdsTensor,
+      past_len: pastLenTensor,
     };
     for (let i = 0; i < this.layers; i += 1) {
       feeds[`cache_k_${i}`] = caches[i * 2].tensor;
       feeds[`cache_v_${i}`] = caches[i * 2 + 1].tensor;
     }
-    const outputs = await this.decoder.run(feeds);
-    const queryLength = outputs.new_k_0?.dims?.[1] ?? tokenIds.length;
-    return new DecoderStep(outputs, this.layers, queryLength);
+    try {
+      const outputs = await this.decoder.run(feeds);
+      const queryLength = outputs.new_k_0?.dims?.[1] ?? tokenIds.length;
+      return new DecoderStep(outputs, this.layers, queryLength);
+    } finally {
+      tokenIdsTensor.dispose?.();
+      pastLenTensor.dispose?.();
+    }
   }
 
   async appendNewKv(step, caches, dstRow) {
