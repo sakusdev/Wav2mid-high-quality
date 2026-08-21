@@ -466,6 +466,17 @@ class BrowserMuScriptor {
           };
         }
         consumeActions(tracker.feed(token), openEvents, notes, drums);
+        if (generatedCount === MUSCRIPTOR_MAX_GENERATION) {
+          const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0);
+          console.warn(`MuScriptor chunk reached ${MUSCRIPTOR_MAX_GENERATION} tokens without EOS; continuing like upstream no_eos_is_ok=True.`);
+          return {
+            eos: false,
+            capped: true,
+            tokens: generatedCount,
+            elapsedSeconds,
+          };
+        }
+
         const emptyData = this.decoderActivationType === 'float32'
           ? new Float32Array(0)
           : new Uint16Array(0);
@@ -482,19 +493,7 @@ class BrowserMuScriptor {
         pastLen += 1;
         if (pastLen >= this.maxCache - 1) throw new Error('MuScriptor KV cache limit reached before EOS.');
       }
-
-      // Upstream MuScriptor defaults to no_eos_is_ok=True: reaching the
-      // 2000-token generation cap is a warning/soft boundary, not a failed
-      // transcription. Keep the browser behavior compatible and continue to
-      // the next 5-second chunk while retaining the decoded events.
-      const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0);
-      console.warn(`MuScriptor chunk reached ${MUSCRIPTOR_MAX_GENERATION} tokens without EOS; continuing like upstream no_eos_is_ok=True.`);
-      return {
-        eos: false,
-        capped: true,
-        tokens: MUSCRIPTOR_MAX_GENERATION,
-        elapsedSeconds,
-      };
+      throw new Error('MuScriptor generation loop exited unexpectedly.');
     } finally {
       step?.dispose();
       for (const cache of caches) {
