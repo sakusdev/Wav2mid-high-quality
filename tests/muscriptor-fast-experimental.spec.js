@@ -14,7 +14,11 @@ test('MuScriptor exposes an opt-in FAST experimental toggle', async ({ page }) =
   expect(await page.locator('#muscriptorFastToggle').isChecked()).toBe(false);
   expect(await page.evaluate(() => globalThis.__WAV2MID_MUSCRIPTOR_FAST_STATE__?.enabled)).toBe(false);
 
-  await page.locator('#muscriptorFastToggle').check({ force: true });
+  await page.evaluate(() => {
+    const toggle = document.getElementById('muscriptorFastToggle');
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event('change', { bubbles: true }));
+  });
   expect(await page.evaluate(() => globalThis.__WAV2MID_MUSCRIPTOR_FAST_STATE__?.enabled)).toBe(true);
   expect(await page.locator('#muscriptorFastState').textContent()).toContain('ON');
 });
