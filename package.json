@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "prepare-runtime": "node scripts/copy-runtime.mjs",
+    "prepare:muscriptor-workers": "node scripts/prepare-muscriptor-workers-build.mjs",
     "dev": "npm run prepare-runtime && vite",
-    "build": "npm run prepare-runtime && vite build && node scripts/check-static-assets.mjs --limit-mib=25",
+    "build": "npm run prepare:muscriptor-workers && npm run prepare-runtime && vite build && node scripts/check-static-assets.mjs --limit-mib=25",
     "preview": "vite preview",
     "test:e2e": "playwright test",
     "test:bench:syntax": "node --check scripts/benchmark-metrics.mjs && node --check scripts/browser-bench-runner.mjs && node --check scripts/benchmark-suite.mjs && node --check scripts/tune.mjs && node --check scripts/prepare-maestro-manifest.mjs && node --check scripts/prepare-slakh-manifest.mjs && node --check scripts/create-benchmark-smoke-fixture.mjs",
