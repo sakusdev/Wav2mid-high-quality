@@ -9,6 +9,7 @@ import {
 } from '@spotify/basic-pitch';
 import { Midi } from '@tonejs/midi';
 import { createSourceStems } from './separation.js';
+import FFT from 'fft.js';
 
 const MODEL_URL = '/model/basic-pitch/model.json';
 const TARGET_SAMPLE_RATE = 22050;
@@ -523,16 +524,80 @@ export function detectDrumEvents(percussive, sampleRate) {
     } else if (highRatio > 0.52 || frame.zcr > 0.24) {
       midi = 42;
       name = 'Hi-hat';
-    } else if (highRatio < 0.34 && frame.zcr < 0.075) {
-      // Pitched attacks (especially piano/guitar) leak into an HPSS percussive
-      // stem but usually lack the broadband/high-ZCR evidence of a snare.
-      continue;
+    } else {
+      // HPSS can strip most high-frequency content from a real drum hit,
+      // so a single high-band threshold loses hats/snares. Conversely,
+      // piano/guitar attacks can leak strongly into the percussive stem.
+      // Keep fallback percussion only when at least one independent
+      // transient/noise cue supports it.
+      const lowHeavyTransient = lowRatio >= 0.53 && frame.onset >= threshold * 1.45;
+      const highZcrTransient = frame.zcr >= 0.15;
+      let supported = lowHeavyTransient || highZcrTransient;
+      if (!supported) {
+        const spectral = drumSpectralEvidence(percussive, frame.start, sampleRate, frameSize);
+        const noiseLike = spectral.flatness >= 0.18;
+        const strongBroadTransient = spectral.flatness >= 0.08
+          && spectral.periodicity <= 0.45
+          && frame.onset >= threshold * 1.8;
+        supported = noiseLike || strongBroadTransient;
+      }
+      if (!supported) continue;
     }
     const velocity = clamp(0.3 + 0.7 * (frame.onset / maxStrength), 0.12, 1);
     drums.push({ midi, name, time, duration: 0.055, velocity });
     lastTime = time;
   }
   return drums;
+}
+
+function drumSpectralEvidence(samples, start, sampleRate, frameSize) {
+  const fft = new FFT(frameSize);
+  const input = new Array(frameSize).fill(0);
+  const centered = new Float32Array(frameSize);
+  let mean = 0;
+  for (let i = 0; i < frameSize; i += 1) {
+    const value = samples[start + i] ?? 0;
+    centered[i] = value;
+    mean += value;
+    input[i] = value * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (frameSize - 1)));
+  }
+  mean /= frameSize;
+  for (let i = 0; i < frameSize; i += 1) centered[i] -= mean;
+
+  const spectrum = fft.createComplexArray();
+  fft.realTransform(spectrum, input);
+  const firstBin = Math.max(1, Math.ceil((70 * frameSize) / sampleRate));
+  const lastBin = Math.min(frameSize / 2, Math.floor((8000 * frameSize) / sampleRate));
+  let magnitudeSum = 0;
+  let logMagnitudeSum = 0;
+  let binCount = 0;
+  for (let bin = firstBin; bin <= lastBin; bin += 1) {
+    const magnitude = Math.hypot(spectrum[bin * 2], spectrum[bin * 2 + 1]);
+    magnitudeSum += magnitude;
+    logMagnitudeSum += Math.log(magnitude + 1e-9);
+    binCount += 1;
+  }
+  const arithmeticMean = magnitudeSum / Math.max(1, binCount);
+  const flatness = Math.exp(logMagnitudeSum / Math.max(1, binCount)) / Math.max(1e-12, arithmeticMean);
+
+  const minLag = Math.max(1, Math.floor(sampleRate / 1800));
+  const maxLag = Math.min(frameSize - 2, Math.floor(sampleRate / 70));
+  let periodicity = 0;
+  for (let lag = minLag; lag <= maxLag; lag += 2) {
+    let dot = 0;
+    let energyA = 0;
+    let energyB = 0;
+    for (let i = 0; i < frameSize - lag; i += 1) {
+      const a = centered[i];
+      const b = centered[i + lag];
+      dot += a * b;
+      energyA += a * a;
+      energyB += b * b;
+    }
+    const correlation = dot / Math.max(1e-12, Math.sqrt(energyA * energyB));
+    if (correlation > periodicity) periodicity = correlation;
+  }
+  return { flatness, periodicity };
 }
 
 function dedupeDrums(drums) {
