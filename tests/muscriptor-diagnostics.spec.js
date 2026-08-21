@@ -1,4 +1,8 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test, expect } from '@playwright/test';
+
+const diagnosticsSource = join(process.cwd(), 'src', 'muscriptor-diagnostics-bootstrap.js');
 
 test('MuScriptor diagnostics stay lazy until the loader is called', async ({ page }) => {
   const requests = [];
@@ -72,4 +76,20 @@ test('MuScriptor distinguishes conditioner asset delivery failure', async ({ pag
   expect(error?.stage).toBe('conditioner-asset');
   expect(error?.message).toContain('conditioner');
   expect(error?.message).toContain('HTTP 404');
+});
+
+test('MuScriptor diagnostics do not allocate and destroy a throwaway WebGPU device', async () => {
+  const source = await readFile(diagnosticsSource, 'utf8');
+  expect(source).not.toContain('navigator.gpu.requestAdapter');
+  expect(source).not.toContain('probeDevice');
+  expect(source).toContain('adapter/device delegated to model core');
+});
+
+test('MuScriptor surfaces ORT and model-session progress instead of appearing frozen at WebGPU', async () => {
+  const source = await readFile(diagnosticsSource, 'utf8');
+  expect(source).toContain('ONNX Runtime初期化中');
+  expect(source).toContain('conditionerモデル読込・compile中');
+  expect(source).toContain('decoderモデル読込・compile中');
+  expect(source).toContain('startLoadHeartbeat');
+  expect(source).toContain('初回はモデル取得とWebGPUコンパイルに時間がかかります');
 });

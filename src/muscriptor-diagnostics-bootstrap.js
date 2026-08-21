@@ -2,6 +2,8 @@ const MODEL_MANIFEST_URL = '/models/muscriptor-small/manifest.json';
 const DIAGNOSTIC_KEY = '__WAV2MID_MUSCRIPTOR_DIAGNOSTICS__';
 const LOADER_KEY = '__WAV2MID_MUSCRIPTOR_MODEL_LOADER__';
 const MAX_TRACE = 32;
+const HEARTBEAT_MS = 5000;
+const SLOW_STAGE_MS = 30000;
 
 if (!globalThis[LOADER_KEY]) {
   globalThis[LOADER_KEY] = loadMuScriptorWithDiagnostics;
@@ -14,40 +16,17 @@ export async function loadMuScriptorWithDiagnostics() {
   const manifest = await fetchManifest(trace);
   await probeModelAssets(manifest, trace);
 
-  publish(trace, 'webgpu-adapter', 'running', 'high-performance');
+  publish(trace, 'webgpu-adapter', 'running', 'browser WebGPU API');
   if (!globalThis.navigator?.gpu) {
     throw diagnosticError(trace, 'MUSCRIPTOR_WEBGPU_UNAVAILABLE', 'webgpu-adapter',
       'WebGPU APIが利用できません。',
       'Chromium系ブラウザでWebGPUを有効にし、対応GPU/ドライバを使用してください。');
   }
-
-  let adapter;
-  try {
-    adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-  } catch (cause) {
-    throw diagnosticError(trace, 'MUSCRIPTOR_WEBGPU_ADAPTER', 'webgpu-adapter',
-      `WebGPU adapter取得失敗: ${messageOf(cause)}`,
-      'GPUドライバ、ブラウザのWebGPU設定、ハードウェアアクセラレーションを確認してください。', cause);
-  }
-  if (!adapter) {
-    throw diagnosticError(trace, 'MUSCRIPTOR_WEBGPU_ADAPTER', 'webgpu-adapter',
-      '利用可能なWebGPU adapterがありません。',
-      'GPUドライバ、ブラウザのWebGPU設定、ハードウェアアクセラレーションを確認してください。');
-  }
-  publish(trace, 'webgpu-adapter', 'ok', adapter.info?.device || adapter.info?.description || 'adapter ready');
-
-  publish(trace, 'webgpu-device', 'running', 'requestDevice');
-  let probeDevice;
-  try {
-    probeDevice = await adapter.requestDevice();
-    publish(trace, 'webgpu-device', 'ok', 'device ready');
-  } catch (cause) {
-    throw diagnosticError(trace, 'MUSCRIPTOR_WEBGPU_DEVICE', 'webgpu-device',
-      `WebGPU device作成失敗: ${messageOf(cause)}`,
-      'GPUメモリ不足またはドライバ制限の可能性があります。ほかのGPU負荷を下げて再試行してください。', cause);
-  } finally {
-    probeDevice?.destroy?.();
-  }
+  // Do not allocate a throwaway adapter/device here. The browser core creates
+  // the one real device that ONNX Runtime sessions will keep using. Creating a
+  // probe GPUDevice and immediately destroying it was redundant and can upset
+  // mobile GPU drivers immediately before the heavy ORT WebGPU initialization.
+  publish(trace, 'webgpu-adapter', 'ok', 'WebGPU API ready; adapter/device delegated to model core');
 
   publish(trace, 'ort-runtime', 'running', 'ONNX Runtime WebGPU');
   let ort;
@@ -59,6 +38,7 @@ export async function loadMuScriptorWithDiagnostics() {
   }
 
   const restoreOrt = instrumentOrtSessions(ort, manifest, trace);
+  const stopHeartbeat = startLoadHeartbeat(trace);
   try {
     publish(trace, 'model-loader', 'running', 'MuScriptor browser core');
     const { loadMuScriptorBrowserModel } = await import('./muscriptor-browser-core.js');
@@ -69,6 +49,7 @@ export async function loadMuScriptorWithDiagnostics() {
     if (cause?.name === 'MuScriptorDiagnosticError') throw cause;
     throw wrapRuntimeError(trace, cause, 'model-loader', 'MUSCRIPTOR_MODEL_LOAD');
   } finally {
+    stopHeartbeat();
     restoreOrt();
   }
 }
@@ -231,6 +212,16 @@ function wrapModel(model, trace) {
 function wrapRuntimeError(trace, cause, stage, fallbackCode) {
   const text = messageOf(cause);
   const lower = text.toLowerCase();
+  if (/no webgpu adapter|requestadapter|adapter.*unavailable/.test(lower)) {
+    return diagnosticError(trace, 'MUSCRIPTOR_WEBGPU_ADAPTER', stage,
+      `WebGPU adapter取得失敗: ${text}`,
+      'GPUドライバ、ブラウザのWebGPU設定、ハードウェアアクセラレーションを確認してください。', cause);
+  }
+  if (/requestdevice|failed to create.*device|gpu device.*failed/.test(lower)) {
+    return diagnosticError(trace, 'MUSCRIPTOR_WEBGPU_DEVICE', stage,
+      `WebGPU device作成失敗: ${text}`,
+      'GPUメモリ不足またはドライバ制限の可能性があります。ほかのGPU負荷を下げて再試行してください。', cause);
+  }
   if (/out of memory|oom|device lost|gpu.*lost|failed to allocate|createbuffer/.test(lower)) {
     return diagnosticError(trace, 'MUSCRIPTOR_GPU_MEMORY', stage,
       `GPUメモリ/デバイスエラー: ${text}`,
@@ -272,6 +263,58 @@ function publish(trace, stage, status, detail) {
   console.debug(`[MuScriptor:${stage}] ${status}${detail ? ` · ${detail}` : ''}`);
   const state = document.getElementById('ultraState');
   if (state && status === 'running') state.textContent = shortStage(stage);
+  surfaceProgress(stage, status);
+}
+
+function startLoadHeartbeat(trace) {
+  const timer = setInterval(() => {
+    const running = latestRunningStage(trace);
+    if (!running) return;
+    const elapsedMs = Math.max(0, performance.now() - running.at);
+    surfaceProgress(running.stage, 'running', elapsedMs);
+    if (elapsedMs >= SLOW_STAGE_MS && /session|model-loader/.test(running.stage)) {
+      const target = document.getElementById('progressHint');
+      if (target) {
+        target.textContent = '初回はモデル取得とWebGPUコンパイルに時間がかかります。表示中のstageと経過秒数が動いていれば処理は継続中です。';
+      }
+    }
+  }, HEARTBEAT_MS);
+  return () => clearInterval(timer);
+}
+
+function latestRunningStage(trace) {
+  const latestByStage = new Map();
+  for (const item of trace) latestByStage.set(item.stage, item);
+  const running = [...latestByStage.values()].filter(item => item.status === 'running');
+  return running.sort((a, b) => b.at - a.at)[0] || null;
+}
+
+function surfaceProgress(stage, status, elapsedMs = 0) {
+  if (status !== 'running') return;
+  const stages = {
+    manifest: [0.010, 'MuScriptor: manifest確認中…'],
+    'conditioner-asset': [0.014, 'MuScriptor: conditioner配信確認中…'],
+    'decoder-asset': [0.018, 'MuScriptor: decoder配信確認中…'],
+    'webgpu-adapter': [0.022, 'MuScriptor: WebGPU API確認中…'],
+    'ort-runtime': [0.026, 'MuScriptor: ONNX Runtime初期化中…'],
+    'model-loader': [0.030, 'MuScriptor: GPU adapter/device作成中…'],
+    'conditioner-session': [0.034, 'MuScriptor: conditionerモデル読込・compile中…'],
+    'decoder-session': [0.038, 'MuScriptor: decoderモデル読込・compile中…'],
+  };
+  const entry = stages[stage];
+  if (!entry) return;
+  const [value, label] = entry;
+  const seconds = elapsedMs >= HEARTBEAT_MS ? ` · ${Math.round(elapsedMs / 1000)}秒` : '';
+  const panel = document.getElementById('progressPanel');
+  const text = document.getElementById('progressText');
+  const pct = document.getElementById('progressPct');
+  const bar = document.getElementById('progressBar');
+  if (panel) panel.hidden = false;
+  if (text) text.textContent = `${label}${seconds}`;
+  if (pct) pct.textContent = `${Math.max(1, Math.round(value * 100))}%`;
+  if (bar) bar.style.width = `${Math.max(1, value * 100)}%`;
+  const state = document.getElementById('ultraState');
+  if (state && elapsedMs >= HEARTBEAT_MS) state.textContent = `${shortStage(stage)} ${Math.round(elapsedMs / 1000)}s`;
 }
 
 function surfaceHint(hint, code) {
@@ -289,6 +332,7 @@ function shortStage(stage) {
     'webgpu-adapter': 'gpu',
     'webgpu-device': 'gpu',
     'ort-runtime': 'ort',
+    'model-loader': 'init',
     'conditioner-session': 'cond',
     'decoder-session': 'dec',
     'conditioner-inference': 'cond',
