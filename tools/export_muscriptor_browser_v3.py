@@ -65,11 +65,12 @@ def ensure_small_checkpoint_config(weights: Path) -> None:
     dict, verify it is really the 768x14 small checkpoint, then write the
     canonical config expected by TranscriptionModel.load_model().
     """
-    weights = weights.resolve()
-    if not weights.exists():
-        raise RuntimeError(f"MuScriptor checkpoint missing: {weights}")
+    local_weights = weights.absolute()
+    real_weights = local_weights.resolve()
+    if not real_weights.exists():
+        raise RuntimeError(f"MuScriptor checkpoint missing: {local_weights}")
 
-    with safe_open(str(weights), framework="pt", device="cpu") as handle:
+    with safe_open(str(real_weights), framework="pt", device="cpu") as handle:
         keys = list(handle.keys())
         mel_key = "condition_provider.conditioners.self_wav.output_proj.weight"
         linear_key = "linear.weight" if "linear.weight" in keys else "linears.0.weight"
@@ -100,7 +101,9 @@ def ensure_small_checkpoint_config(weights: Path) -> None:
             "Refusing to export with the wrong architecture."
         )
 
-    config_path = weights.parent / "config.json"
+    # Keep config beside the path passed to load_model(), not beside the
+    # resolved Hugging Face cache blob when model.safetensors is a symlink.
+    config_path = local_weights.parent / "config.json"
     config_path.write_text(json.dumps(SMALL_CONFIG, indent=2) + "\n")
     print(f"MuScriptor checkpoint config: small 768d / 12h / 14L ({config_path})")
 
