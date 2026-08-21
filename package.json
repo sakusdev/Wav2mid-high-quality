@@ -17,8 +17,10 @@
     "benchmark:prepare-slakh": "node scripts/prepare-slakh-manifest.mjs",
     "tune": "node scripts/tune.mjs",
     "check:temporary-assets": "node scripts/check-static-assets.mjs --limit-mib=5",
-    "deploy": "npm run build && wrangler deploy",
-    "deploy:temporary": "npm run build && npm run check:temporary-assets && wrangler deploy --temporary"
+    "check:muscriptor-model": "node scripts/require-muscriptor-model.mjs --root=public",
+    "check:muscriptor-dist": "node scripts/require-muscriptor-model.mjs --root=dist",
+    "deploy": "npm run build && npm run check:muscriptor-dist && wrangler deploy",
+    "deploy:temporary": "npm run build && npm run check:temporary-assets && npm run check:muscriptor-dist && wrangler deploy --temporary"
   },
   "dependencies": {
     "@spotify/basic-pitch": "1.0.1",
