@@ -59,24 +59,7 @@ HTDemucs 4-stem (ONNX Runtime Web)
           Harmony + Bass + Drums MIDI
 ```
 
-The HTDemucs model is fetched from the model URL supplied by `demucs-web`; the user's audio is not uploaded. ONNX Runtime Web is also loaded only by NEURAL HQ from a version-pinned jsDelivr release. The small JSEP module/worker glue is staged on the app origin to avoid cross-origin module-worker failures, while the oversized JSEP WASM payload remains on jsDelivr because it exceeds Cloudflare Workers Static Assets' 25 MiB per-file limit. The normal FAST/PRO/INSANE application remains lightweight, while the optional neural path fetches its neural runtime and model only on demand.
-
-## MuScriptor ULTRA diagnostics
-
-The non-commercial MuScriptor browser path stays lazy: neither its models nor ONNX Runtime are fetched until MuScriptor analysis actually starts. When it does start, a lightweight diagnostic layer records the exact failure stage before and during model execution.
-
-Typical stage/error pairs include:
-
-- `manifest` → `MUSCRIPTOR_MANIFEST_*`
-- `conditioner-asset` / `decoder-asset` → `MUSCRIPTOR_ASSET_*`
-- `webgpu-adapter` / `webgpu-device` → `MUSCRIPTOR_WEBGPU_*`
-- `ort-runtime` → `MUSCRIPTOR_ORT_*`
-- `conditioner-session` / `decoder-session` → `MUSCRIPTOR_*_SESSION`
-- `conditioner-inference` / `decoder-inference` → `MUSCRIPTOR_*_INFERENCE`
-- GPU OOM/device loss → `MUSCRIPTOR_GPU_MEMORY`
-- JSEP/WASM fetch/init failure → `MUSCRIPTOR_ORT_RUNTIME_FETCH`
-
-The latest trace is exposed as `window.__WAV2MID_MUSCRIPTOR_DIAGNOSTICS__` for debugging. It contains stage/status/detail records only; it does not contain the user's audio.
+The HTDemucs model is fetched from the model URL supplied by `demucs-web`; the user's audio is not uploaded. ONNX Runtime Web is also loaded only by NEURAL HQ from a version-pinned jsDelivr release. This is deliberate: ONNX Runtime's WebGPU JSEP WASM is larger than Cloudflare Workers Static Assets' 25 MiB per-file limit. The normal FAST/PRO/INSANE application remains fully self-hosted, while the optional neural path fetches its neural runtime and model only on demand.
 
 ## Benchmark lab — proving "strongest"
 
@@ -94,16 +77,120 @@ Supported adapter types:
 
 ```bash
 # Build a real-piano held-out manifest
-npm run benchmark:prepare-maestro -- --dataset /path/to/maestro-v3 --output bench/manifests/maestro-v3.json
+npm run benchmark:prepare-maestro -- \
+  --root /datasets/maestro-v3.0.0 \
+  --split test \
+  --output bench/local-maestro-test.json
 
-# Build a multitrack/instrument manifest
-npm run benchmark:prepare-slakh -- --dataset /path/to/slakh2100_flac_redux --output bench/manifests/slakh2100.json
+# Build an aligned multi-instrument manifest
+npm run benchmark:prepare-slakh -- \
+  --root /datasets/Slakh2100 \
+  --output bench/local-slakh.json \
+  --limit 50
 
-# Evaluate one browser adapter
-npm run benchmark:suite -- --manifest bench/manifests/maestro-v3.json --adapters bench/adapters.example.json --adapter wav2mid-pro --split validation --max-items 20
-
-# Tune mode + sensitivity on a validation set
-npm run tune -- --manifest bench/manifests/maestro-v3.json --adapters bench/adapters.example.json --adapter wav2mid-pro --split validation --max-items 20
+# Same evaluator, multiple systems
+npm run benchmark:suite -- \
+  --manifest bench/local-maestro-test.json \
+  --adapters bench/adapters.local.json \
+  --adapter wav2mid-insane,muscriptor-small
 ```
 
-The benchmark tooling is intentionally separate from the UI pipeline: model changes can be compared against exactly the same held-out set and metric definitions before promoting them.
+The Slakh importer merges the actual `MIDI/Sxx.mid` files used for stem rendering rather than treating `all_src.mid` as exact synthesis ground truth.
+
+### Auto-tuning
+
+Tune only on a validation split, then evaluate once on an untouched test split.
+
+```bash
+npm run tune -- \
+  --manifest bench/local-validation.json \
+  --split validation \
+  --backend wasm \
+  --modes pro,insane \
+  --sensitivities 0.80,0.90,1.00,1.10,1.20
+```
+
+The tuner executes the actual production browser pipeline for every candidate and ranks the objective. A specialist model is a **candidate**, not an automatic upgrade: it should be promoted to the browser/WebGPU pipeline only after it beats the current path on the relevant held-out split and its model license is compatible with deployment.
+
+CI includes a complete benchmark smoke: it generates aligned ground-truth WAV+MIDI, launches the production app, transcribes through Chrome, downloads the real analysis JSON, scores it with the common evaluator, writes a leaderboard, and enforces a minimum objective.
+
+See [`bench/README.md`](bench/README.md) for metric definitions, adapters, licenses and reproducibility rules.
+
+## Local development
+
+Requirements: Node.js 20+.
+
+```bash
+npm install
+npm run dev
+```
+
+`npm run prepare-runtime` copies the Basic Pitch model and TensorFlow.js WASM binaries into `public/`. The large neural separator model and ONNX Runtime neural runtime are not copied into the Cloudflare static bundle.
+
+## Production build and E2E
+
+```bash
+npm run build
+npm run test:e2e
+npm run test:bench:smoke
+npm run preview
+```
+
+`npm run build` also scans every output file and fails if any asset exceeds 25 MiB, matching Cloudflare Workers Static Assets' individual-file limit.
+
+The standard browser E2E creates a deterministic 44.1 kHz stereo fixture containing polyphonic tonal material plus synthetic kick/snare/hat transients. It verifies browser decoding/resampling, STFT separation, multi-pass PRO AMT, ensemble/context stages, drum events, JSON output and a valid multi-track Standard MIDI File. CI intentionally does not download the ~172 MB HTDemucs model; it separately smoke-checks that NEURAL HQ is visible and that neither ONNX Runtime nor the HTDemucs model is fetched merely by toggling the option.
+
+## Lightweight architecture
+
+```text
+Audio file
+  ↓ Web Audio decode
+22.05 kHz mono normalization
+  ↓
+Overlapped chunks
+  ↓
+STFT harmonic/percussive soft masking (PRO/INSANE)
+  ├─ mix
+  ├─ harmonic
+  ├─ bass pass
+  ├─ presence pass (INSANE)
+  └─ percussive → drum onset/classification
+        ↓
+TensorFlow.js Basic Pitch AMT
+        ↓
+Candidate ensemble / INSANE consensus
+  ↓
+Key + chord context decoder
+  ↓
+Real-world continuity + harmonic refiner
+  ↓
+Harmony + Bass + Drums MIDI / JSON / piano roll
+```
+
+### Context decoder
+
+The context stage is a deterministic confidence decoder. It combines cross-stem agreement, estimated key membership, local chord membership, high-register harmonic-ghost heuristics, note confidence and duration. Multi-pass agreement can rescue an unusual note while a weak single-pass high harmonic can be removed.
+
+## Deploy to Cloudflare Workers
+
+The project uses Workers Static Assets (`wrangler.jsonc`).
+
+```bash
+npx wrangler login
+npm run deploy
+```
+
+For GitHub Actions deployment, configure repository secrets:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+The deploy workflow runs on `main` and can also be started manually. If those secrets are absent, it reports that deployment was skipped instead of pretending a public deployment exists.
+
+## Privacy
+
+Audio files are read with browser APIs and are not uploaded by this app. Cloudflare serves the application and lightweight AMT assets. NEURAL HQ fetches the pinned ONNX Runtime browser distribution and HTDemucs model, then performs separation and transcription locally on the user's device.
+
+## License
+
+Project code: MIT (see `LICENSE`). Spotify Basic Pitch, `demucs-web`, ONNX Runtime Web and FFT.js are external dependencies under their own licenses. Benchmark datasets and third-party model checkpoints retain their own licenses and are never relicensed by this repository.
