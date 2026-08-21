@@ -9,6 +9,7 @@ const modelManifest = resolve(root, 'public/models/muscriptor-small/manifest.jso
 const sourceDir = resolve(root, '.muscriptor-source');
 const browserDir = resolve(root, '.muscriptor-browser');
 const stagedDir = resolve(root, 'public/models/muscriptor-small');
+const MUSCRIPTOR_COMMIT = 'e34b397bf0584e67bfd81dc591c390e6dcb03350';
 
 if (process.env.WORKERS_CI !== '1') {
   console.log('MuScriptor Workers Builds preparation: skipped (WORKERS_CI != 1).');
@@ -32,7 +33,7 @@ run('python', [
 ]);
 run('python', [
   '-m', 'pip', 'install', '--disable-pip-version-check',
-  'git+https://github.com/muscriptor/muscriptor.git',
+  `git+https://github.com/muscriptor/muscriptor.git@${MUSCRIPTOR_COMMIT}`,
   'huggingface_hub', 'onnx', 'onnxruntime', 'onnxconverter-common', 'onnx-ir',
 ]);
 
