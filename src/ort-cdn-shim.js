@@ -1,12 +1,13 @@
 // Cloudflare Workers Static Assets rejects individual files over 25 MiB.
-// ONNX Runtime Web 1.27's WebGPU JSEP WASM is kept on the version-pinned CDN.
-// Keep the runtime prefix stable: an older NEURAL HQ path still assigns
-// '/ort-wasm/' even though those assets are not deployed locally. A failed JSEP
-// init poisons the shared ORT instance and makes the subsequent WASM fallback
-// report "previous call to initWasm() failed".
+// Keep the small ORT JSEP module/worker glue on this app's origin, while the
+// large WASM payload remains on a version-pinned CDN. A cross-origin JSEP .mjs
+// can fail Worker construction/dynamic import in Chromium and poison ORT's
+// shared WASM initialization, making every later backend report initWasm errors.
 const ORT_VERSION = '1.27.0';
 const ORT_DIST = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
 const ORT_SCRIPT = `${ORT_DIST}ort.all.min.js`;
+const ORT_JSEP_MJS = '/ort-wasm/ort-wasm-simd-threaded.jsep.mjs';
+const ORT_JSEP_WASM = `${ORT_DIST}ort-wasm-simd-threaded.jsep.wasm`;
 
 const ort = await loadOrt();
 installWasmPathGuard(ort);
@@ -19,11 +20,18 @@ export const TRACE_FUNC_BEGIN = ort.TRACE_FUNC_BEGIN;
 export const TRACE_FUNC_END = ort.TRACE_FUNC_END;
 export default ort;
 
+function stableWasmPaths() {
+  return {
+    mjs: new URL(ORT_JSEP_MJS, location.origin).href,
+    wasm: ORT_JSEP_WASM,
+  };
+}
+
 function installWasmPathGuard(runtime) {
   const wasm = runtime?.env?.wasm;
   if (!wasm) throw new Error('ONNX Runtime Web loaded without env.wasm.');
 
-  let configuredPaths = ORT_DIST;
+  let configuredPaths = stableWasmPaths();
   Object.defineProperty(wasm, 'wasmPaths', {
     configurable: true,
     enumerable: true,
@@ -31,16 +39,17 @@ function installWasmPathGuard(runtime) {
       return configuredPaths;
     },
     set(value) {
-      // Compatibility guard for the stale assignment in neural-transcribe.js.
-      // There is intentionally no /ort-wasm/ deployment in the current app.
+      // Compatibility guard for older NEURAL HQ code that still assigns the
+      // legacy /ort-wasm/ prefix. That prefix intentionally contains only the
+      // JSEP .mjs glue; the oversized .wasm must remain on the CDN.
       if (value === '/ort-wasm/' || value === `${location.origin}/ort-wasm/`) {
-        configuredPaths = ORT_DIST;
+        configuredPaths = stableWasmPaths();
         return;
       }
       configuredPaths = value;
     },
   });
-  wasm.wasmPaths = ORT_DIST;
+  wasm.wasmPaths = stableWasmPaths();
 }
 
 async function loadOrt() {
