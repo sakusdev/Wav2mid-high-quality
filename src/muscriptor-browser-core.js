@@ -14,6 +14,8 @@ const MEL_BINS = 512;
 const FREQ_BINS = FFT_SIZE / 2 + 1;
 const EPS = 1e-6;
 const MODEL_MANIFEST_URL = '/models/muscriptor-small/manifest.json';
+const TOKEN_PROGRESS_EVERY = 16;
+const TOKEN_PROGRESS_MAX_SILENCE_MS = 500;
 
 const PERIODIC_HANN = new Float32Array(FFT_SIZE);
 for (let i = 0; i < FFT_SIZE; i += 1) {
@@ -331,6 +333,7 @@ class BrowserMuScriptor {
     const openEvents = new Map();
     const notes = [];
     const drums = [];
+    let cappedChunks = 0;
     const selectedInstruments = normalizeInstrumentNames(options.instruments || []);
     const instrumentIds = selectedInstruments.length
       ? selectedInstruments.map(name => INSTRUMENT_GROUPS[name] + 2)
@@ -349,12 +352,36 @@ class BrowserMuScriptor {
       chunk.set(waveform.subarray(chunkIndex * chunkSamples, Math.min(waveform.length, (chunkIndex + 1) * chunkSamples)));
       const mel = logMelForFiveSecondChunk(chunk);
       const prefix = await this.condition(mel, instrumentIds);
-      await this.generateChunk(prefix, prompt, forbidden, tracker, openEvents, notes, drums);
+      const generation = await this.generateChunk(
+        prefix,
+        prompt,
+        forbidden,
+        tracker,
+        openEvents,
+        notes,
+        drums,
+        tokenProgress => {
+          const withinChunk = Math.min(tokenProgress.generated / MUSCRIPTOR_MAX_GENERATION, 0.98);
+          onProgress?.({
+            stage: 'muscriptor-decode',
+            value: 0.04 + 0.94 * ((chunkIndex + withinChunk) / chunks),
+            detail: formatTokenProgress(chunkIndex, chunks, tokenProgress),
+          });
+        },
+      );
+      if (generation.capped) {
+        cappedChunks += 1;
+        onProgress?.({
+          stage: 'muscriptor-decode',
+          value: 0.04 + 0.94 * ((chunkIndex + 0.99) / chunks),
+          detail: `chunk ${chunkIndex + 1}/${chunks} · ${generation.tokens} tok cap · continuing`,
+        });
+      }
 
       onProgress?.({
         stage: 'muscriptor-decode',
         value: 0.04 + 0.94 * ((chunkIndex + 1) / chunks),
-        detail: `${chunkIndex + 1}/${chunks} chunks`,
+        detail: `${chunkIndex + 1}/${chunks} chunks · ${generation.tokens} tok${generation.capped ? ' · cap' : ''}`,
       });
       await yieldToUi();
     }
@@ -369,6 +396,7 @@ class BrowserMuScriptor {
         instrument: 'drums', program: 128,
       }))],
       chunks,
+      cappedChunks,
       model: this.manifest,
     };
   }
@@ -385,8 +413,10 @@ class BrowserMuScriptor {
     }
   }
 
-  async generateChunk(prefix, prompt, forbidden, tracker, openEvents, notes, drums) {
+  async generateChunk(prefix, prompt, forbidden, tracker, openEvents, notes, drums, onTokenProgress) {
     const caches = this.createCaches();
+    const startedAt = performance.now();
+    let lastProgressAt = startedAt;
     let step = null;
     try {
       const firstTokens = BigInt64Array.from([MUSCRIPTOR_INITIAL_TOKEN, ...prompt], BigInt);
@@ -408,7 +438,33 @@ class BrowserMuScriptor {
           step.dispose();
           step = null;
         }
-        if (token === MUSCRIPTOR_EOS) return;
+        const generatedCount = generated + 1;
+        const now = performance.now();
+        const forceProgress = generatedCount === 1
+          || token === MUSCRIPTOR_EOS
+          || generatedCount === MUSCRIPTOR_MAX_GENERATION;
+        if (forceProgress
+          || generatedCount % TOKEN_PROGRESS_EVERY === 0
+          || now - lastProgressAt >= TOKEN_PROGRESS_MAX_SILENCE_MS) {
+          const elapsedSeconds = Math.max((now - startedAt) / 1000, 0.001);
+          onTokenProgress?.({
+            generated: generatedCount,
+            max: MUSCRIPTOR_MAX_GENERATION,
+            token,
+            elapsedSeconds,
+            tokPerSecond: generatedCount / elapsedSeconds,
+            eos: token === MUSCRIPTOR_EOS,
+          });
+          lastProgressAt = now;
+        }
+        if (token === MUSCRIPTOR_EOS) {
+          return {
+            eos: true,
+            capped: false,
+            tokens: generatedCount,
+            elapsedSeconds: Math.max((performance.now() - startedAt) / 1000, 0),
+          };
+        }
         consumeActions(tracker.feed(token), openEvents, notes, drums);
         const emptyData = this.decoderActivationType === 'float32'
           ? new Float32Array(0)
@@ -426,7 +482,19 @@ class BrowserMuScriptor {
         pastLen += 1;
         if (pastLen >= this.maxCache - 1) throw new Error('MuScriptor KV cache limit reached before EOS.');
       }
-      throw new Error(`MuScriptor chunk did not emit EOS within ${MUSCRIPTOR_MAX_GENERATION} tokens.`);
+
+      // Upstream MuScriptor defaults to no_eos_is_ok=True: reaching the
+      // 2000-token generation cap is a warning/soft boundary, not a failed
+      // transcription. Keep the browser behavior compatible and continue to
+      // the next 5-second chunk while retaining the decoded events.
+      const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0);
+      console.warn(`MuScriptor chunk reached ${MUSCRIPTOR_MAX_GENERATION} tokens without EOS; continuing like upstream no_eos_is_ok=True.`);
+      return {
+        eos: false,
+        capped: true,
+        tokens: MUSCRIPTOR_MAX_GENERATION,
+        elapsedSeconds,
+      };
     } finally {
       step?.dispose();
       for (const cache of caches) {
@@ -568,6 +636,13 @@ function argmax(values, forbidden) {
   }
   if (best < 0) throw new Error('MuScriptor produced no valid next token.');
   return best;
+}
+
+function formatTokenProgress(chunkIndex, chunks, progress) {
+  const rate = Number.isFinite(progress.tokPerSecond) ? progress.tokPerSecond : 0;
+  const rateText = rate >= 10 ? rate.toFixed(1) : rate.toFixed(2);
+  const elapsed = Number.isFinite(progress.elapsedSeconds) ? progress.elapsedSeconds : 0;
+  return `chunk ${chunkIndex + 1}/${chunks} · tok ${progress.generated}/${progress.max} · ${rateText} tok/s · ${elapsed.toFixed(1)}s${progress.eos ? ' · EOS' : ''}`;
 }
 
 function instrumentForProgram(program) {
