@@ -125,7 +125,7 @@ export async function transcribe(audioBuffer, options = {}, onProgress = () => {
       stems = createSourceStems(chunk.samples, TARGET_SAMPLE_RATE, options.mode ?? 'pro');
       separationStats.push(stems.stats);
       if (mode.drums) {
-        const localDrums = detectDrumEvents(stems.percussive, TARGET_SAMPLE_RATE);
+        const localDrums = detectDrumEvents(stems.percussive, TARGET_SAMPLE_RATE, stems.mix);
         for (const drum of localDrums) drumEvents.push({ ...drum, time: drum.time + chunk.offsetSeconds });
       }
     }
@@ -475,7 +475,7 @@ function contextCorrect(notes, chords, keyDetail, mode) {
   return result;
 }
 
-export function detectDrumEvents(percussive, sampleRate) {
+export function detectDrumEvents(percussive, sampleRate, reference = null) {
   if (!percussive?.length) return [];
   const low = onePoleLowPass(percussive, sampleRate, 180);
   const high = onePoleHighPass(percussive, sampleRate, 2600);
@@ -550,6 +550,61 @@ export function detectDrumEvents(percussive, sampleRate) {
     drums.push({ midi, name, time, duration: 0.055, velocity });
     lastTime = time;
   }
+
+  if (reference?.length === percussive.length) {
+    const recovered = detectHighFrequencyDrums(reference, sampleRate);
+    for (const drum of recovered) {
+      if (drums.some(existing => Math.abs(existing.time - drum.time) < 0.07)) continue;
+      drums.push(drum);
+    }
+    drums.sort((a, b) => a.time - b.time || a.midi - b.midi);
+  }
+  return drums;
+}
+
+function detectHighFrequencyDrums(reference, sampleRate) {
+  const high = onePoleHighPass(reference, sampleRate, 4500);
+  const frameSize = 1024;
+  const hop = 256;
+  const frames = [];
+  let previousHighRms = 0;
+  for (let start = 0; start + frameSize <= reference.length; start += hop) {
+    let totalEnergy = 0;
+    let highEnergy = 0;
+    let crossings = 0;
+    for (let i = 0; i < frameSize; i += 1) {
+      const x = reference[start + i];
+      totalEnergy += x * x;
+      highEnergy += high[start + i] * high[start + i];
+      if (i > 0 && Math.signbit(x) !== Math.signbit(reference[start + i - 1])) crossings += 1;
+    }
+    const rms = Math.sqrt(totalEnergy / frameSize);
+    const highRms = Math.sqrt(highEnergy / frameSize);
+    const onset = Math.max(0, highRms - previousHighRms * 0.86);
+    frames.push({ start, rms, highRms, onset, zcr: crossings / frameSize });
+    previousHighRms = highRms;
+  }
+  if (!frames.length) return [];
+  const strengths = frames.map(frame => frame.onset).sort((a, b) => a - b);
+  const p75 = strengths[Math.floor(strengths.length * 0.75)] ?? 0;
+  const mean = strengths.reduce((sum, x) => sum + x, 0) / strengths.length;
+  const threshold = Math.max(0.0015, p75 * 1.4, mean * 1.7);
+  const maxStrength = Math.max(threshold, ...strengths);
+  const drums = [];
+  let lastTime = -1;
+  for (let i = 1; i < frames.length - 1; i += 1) {
+    const frame = frames[i];
+    if (frame.onset < threshold || frame.onset < frames[i - 1].onset || frame.onset < frames[i + 1].onset) continue;
+    const time = frame.start / sampleRate;
+    if (time - lastTime < 0.055) continue;
+    const highRatio = frame.highRms / Math.max(1e-6, frame.rms);
+    if (highRatio < 0.085 || frame.zcr < 0.05) continue;
+    const spectral = drumSpectralEvidence(reference, frame.start, sampleRate, frameSize);
+    if (spectral.highFlatness < 0.45) continue;
+    const velocity = clamp(0.3 + 0.7 * (frame.onset / maxStrength), 0.12, 1);
+    drums.push({ midi: 42, name: 'Hi-hat', time, duration: 0.045, velocity });
+    lastTime = time;
+  }
   return drums;
 }
 
@@ -571,17 +626,28 @@ function drumSpectralEvidence(samples, start, sampleRate, frameSize) {
   fft.realTransform(spectrum, input);
   const firstBin = Math.max(1, Math.ceil((70 * frameSize) / sampleRate));
   const lastBin = Math.min(frameSize / 2, Math.floor((8000 * frameSize) / sampleRate));
+  const highFirstBin = Math.max(firstBin, Math.ceil((4000 * frameSize) / sampleRate));
   let magnitudeSum = 0;
   let logMagnitudeSum = 0;
   let binCount = 0;
+  let highMagnitudeSum = 0;
+  let highLogMagnitudeSum = 0;
+  let highBinCount = 0;
   for (let bin = firstBin; bin <= lastBin; bin += 1) {
     const magnitude = Math.hypot(spectrum[bin * 2], spectrum[bin * 2 + 1]);
     magnitudeSum += magnitude;
     logMagnitudeSum += Math.log(magnitude + 1e-9);
     binCount += 1;
+    if (bin >= highFirstBin) {
+      highMagnitudeSum += magnitude;
+      highLogMagnitudeSum += Math.log(magnitude + 1e-9);
+      highBinCount += 1;
+    }
   }
   const arithmeticMean = magnitudeSum / Math.max(1, binCount);
   const flatness = Math.exp(logMagnitudeSum / Math.max(1, binCount)) / Math.max(1e-12, arithmeticMean);
+  const highArithmeticMean = highMagnitudeSum / Math.max(1, highBinCount);
+  const highFlatness = Math.exp(highLogMagnitudeSum / Math.max(1, highBinCount)) / Math.max(1e-12, highArithmeticMean);
 
   const minLag = Math.max(1, Math.floor(sampleRate / 1800));
   const maxLag = Math.min(frameSize - 2, Math.floor(sampleRate / 70));
@@ -600,7 +666,7 @@ function drumSpectralEvidence(samples, start, sampleRate, frameSize) {
     const correlation = dot / Math.max(1e-12, Math.sqrt(energyA * energyB));
     if (correlation > periodicity) periodicity = correlation;
   }
-  return { flatness, periodicity };
+  return { flatness, highFlatness, periodicity };
 }
 
 function dedupeDrums(drums) {
