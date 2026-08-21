@@ -80,4 +80,22 @@ test('Workers Builds preparation contains the complete export and staging path',
   expect(source).toContain("'--source', source");
   expect(source).toContain('tools/stage_muscriptor_cloudflare.py');
   expect(source).toContain("'--root=public'");
+  expect(source).toContain('e34b397bf0584e67bfd81dc591c390e6dcb03350');
+});
+
+test('MuScriptor small checkpoint is made self-describing before load_model', async () => {
+  const fetchSource = await readFile(join(process.cwd(), 'tools', 'fetch_muscriptor_weights.py'), 'utf8');
+  const exporterSource = await readFile(join(process.cwd(), 'tools', 'export_muscriptor_browser_v3.py'), 'utf8');
+
+  for (const source of [fetchSource, exporterSource]) {
+    expect(source).toContain('768');
+    expect(source).toContain('12');
+    expect(source).toContain('14');
+    expect(source).toContain('1393');
+    expect(source).toContain('config.json');
+  }
+
+  expect(exporterSource).toContain('ensure_small_checkpoint_config');
+  expect(exporterSource).toContain('safe_open');
+  expect(exporterSource).toContain('Refusing to export with the wrong architecture');
 });
