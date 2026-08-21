@@ -1,10 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const guard = join(process.cwd(), 'scripts', 'require-muscriptor-model.mjs');
+const workersPrep = join(process.cwd(), 'scripts', 'prepare-muscriptor-workers-build.mjs');
 
 function runGuard(root) {
   return spawnSync(process.execPath, [guard, `--root=${root}`], {
@@ -57,4 +58,26 @@ test('MuScriptor deploy guard accepts staged streamed model parts', async () => 
   const result = runGuard(root);
   expect(result.status, result.stderr).toBe(0);
   expect(result.stdout).toContain('MuScriptor deploy guard: OK');
+});
+
+test('ordinary builds do not invoke the heavy Workers MuScriptor exporter', () => {
+  const result = spawnSync(process.execPath, [workersPrep], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env: { ...process.env, WORKERS_CI: '0' },
+  });
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout).toContain('skipped');
+});
+
+test('Workers Builds preparation contains the complete export and staging path', async () => {
+  const source = await readFile(workersPrep, 'utf8');
+  const pythonVersion = await readFile(join(process.cwd(), '.python-version'), 'utf8');
+  expect(pythonVersion.trim()).toBe('3.12');
+  expect(source).toContain("process.env.WORKERS_CI !== '1'");
+  expect(source).toContain('tools/fetch_muscriptor_weights.py');
+  expect(source).toContain('tools/export_muscriptor_browser_v3.py');
+  expect(source).toContain("'--source', source");
+  expect(source).toContain('tools/stage_muscriptor_cloudflare.py');
+  expect(source).toContain("'--root=public'");
 });
