@@ -18,15 +18,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
+
+from safetensors import safe_open
 
 import export_muscriptor_browser as base
 from export_muscriptor_browser_v2 import StaticBrowserLayer
 
 
 base.BrowserLayer = StaticBrowserLayer
+
+SMALL_CONFIG = {
+    "dim": 768,
+    "num_heads": 12,
+    "num_layers": 14,
+    "card": 1393,
+}
 
 
 def keep_fp32(src: Path, dst: Path) -> None:
@@ -37,11 +47,62 @@ def keep_fp32(src: Path, dst: Path) -> None:
 base.convert_to_fp16 = keep_fp32
 
 
-def output_dir_from_argv(argv: list[str]) -> Path:
+def paths_from_argv(argv: list[str]) -> tuple[Path, Path]:
     parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args, _ = parser.parse_known_args(argv)
-    return args.output
+    return args.weights, args.output
+
+
+def ensure_small_checkpoint_config(weights: Path) -> None:
+    """Make a local small checkpoint self-describing for current MuScriptor.
+
+    Current MuScriptor resolves a local safetensors architecture from a sibling
+    config.json and otherwise falls back to the large 1536x48 architecture.
+    Older/community mirrors can carry the correct small weights without that
+    companion config. Inspect tensor metadata without loading the 400 MiB state
+    dict, verify it is really the 768x14 small checkpoint, then write the
+    canonical config expected by TranscriptionModel.load_model().
+    """
+    weights = weights.resolve()
+    if not weights.exists():
+        raise RuntimeError(f"MuScriptor checkpoint missing: {weights}")
+
+    with safe_open(str(weights), framework="pt", device="cpu") as handle:
+        keys = list(handle.keys())
+        mel_key = "condition_provider.conditioners.self_wav.output_proj.weight"
+        linear_key = "linear.weight" if "linear.weight" in keys else "linears.0.weight"
+        if mel_key not in keys or linear_key not in keys:
+            raise RuntimeError("MuScriptor checkpoint does not contain expected small-model tensors")
+
+        mel_shape = tuple(handle.get_slice(mel_key).get_shape())
+        linear_shape = tuple(handle.get_slice(linear_key).get_shape())
+        layer_ids = [
+            int(match.group(1))
+            for key in keys
+            if (match := re.match(r"transformer\.layers\.(\d+)\.", key))
+        ]
+
+    detected = {
+        "dim": int(mel_shape[0]),
+        "num_layers": max(layer_ids) + 1 if layer_ids else 0,
+        "card": int(linear_shape[0]),
+    }
+    expected = {
+        "dim": SMALL_CONFIG["dim"],
+        "num_layers": SMALL_CONFIG["num_layers"],
+        "card": SMALL_CONFIG["card"],
+    }
+    if detected != expected:
+        raise RuntimeError(
+            f"Expected muscriptor-small checkpoint {expected}, detected {detected}. "
+            "Refusing to export with the wrong architecture."
+        )
+
+    config_path = weights.parent / "config.json"
+    config_path.write_text(json.dumps(SMALL_CONFIG, indent=2) + "\n")
+    print(f"MuScriptor checkpoint config: small 768d / 12h / 14L ({config_path})")
 
 
 def _rename_file_entry(output: Path, entry: dict, old_token: str, new_token: str) -> None:
@@ -74,7 +135,8 @@ def rewrite_manifest(output: Path) -> None:
 
 
 def main() -> None:
-    output = output_dir_from_argv(sys.argv[1:])
+    weights, output = paths_from_argv(sys.argv[1:])
+    ensure_small_checkpoint_config(weights)
     base.main()
     rewrite_manifest(output)
 
