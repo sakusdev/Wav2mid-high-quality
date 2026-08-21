@@ -530,16 +530,19 @@ export function detectDrumEvents(percussive, sampleRate) {
       // piano/guitar attacks can leak strongly into the percussive stem.
       // Keep fallback percussion only when at least one independent
       // transient/noise cue supports it.
-      const lowHeavyTransient = lowRatio >= 0.53 && frame.onset >= threshold * 1.45;
       const highZcrTransient = frame.zcr >= 0.15;
-      let supported = lowHeavyTransient || highZcrTransient;
+      let supported = highZcrTransient;
       if (!supported) {
         const spectral = drumSpectralEvidence(percussive, frame.start, sampleRate, frameSize);
-        const noiseLike = spectral.flatness >= 0.18;
+        const lowHeavyTransient = lowRatio >= 0.53
+          && frame.onset >= threshold * 1.45
+          && spectral.flatness >= 0.035
+          && spectral.periodicity <= 0.75;
+        const noiseLike = spectral.flatness >= 0.18 && spectral.periodicity <= 0.82;
         const strongBroadTransient = spectral.flatness >= 0.08
           && spectral.periodicity <= 0.45
           && frame.onset >= threshold * 1.8;
-        supported = noiseLike || strongBroadTransient;
+        supported = lowHeavyTransient || noiseLike || strongBroadTransient;
       }
       if (!supported) continue;
     }
