@@ -20,6 +20,50 @@ export const TRACE_FUNC_BEGIN = ort.TRACE_FUNC_BEGIN;
 export const TRACE_FUNC_END = ort.TRACE_FUNC_END;
 export default ort;
 
+// Experimental knob used by MuScriptor FAST. The JSEP artifact is already the
+// SIMD + threaded build; this selects how many pthread workers ORT may use for
+// WASM/JSEP-side work before the first session initializes the runtime.
+// The normal profile intentionally leaves ORT defaults untouched.
+export function configureOrtRuntimeProfile(profile = 'default') {
+  const wasm = ort?.env?.wasm;
+  if (!wasm) {
+    return { profile, applied: false, numThreads: 1, proxy: false, reason: 'env.wasm unavailable' };
+  }
+
+  if (profile !== 'fast') {
+    return {
+      profile: 'default',
+      applied: false,
+      numThreads: Number(wasm.numThreads) || null,
+      proxy: Boolean(wasm.proxy),
+    };
+  }
+
+  const isolated = globalThis.crossOriginIsolated === true;
+  const cores = Math.max(1, Number(globalThis.navigator?.hardwareConcurrency) || 4);
+  // Keep enough CPU headroom for the UI/audio thread on mobile. Pixel-class
+  // 8-core devices land at 4 threads, 4-core devices at 2, and non-isolated
+  // pages must remain single-threaded because SharedArrayBuffer is unavailable.
+  const requestedThreads = isolated
+    ? Math.max(2, Math.min(4, Math.floor(cores / 2)))
+    : 1;
+
+  try { wasm.numThreads = requestedThreads; } catch { /* ORT may already be initialized. */ }
+  try { wasm.proxy = false; } catch { /* Keep direct calls if this build exposes proxy as readonly. */ }
+
+  const effectiveThreads = Math.max(1, Number(wasm.numThreads) || requestedThreads);
+  return {
+    profile: 'fast',
+    applied: true,
+    numThreads: effectiveThreads,
+    requestedThreads,
+    proxy: Boolean(wasm.proxy),
+    crossOriginIsolated: isolated,
+    hardwareConcurrency: cores,
+    artifact: 'simd-threaded-jsep',
+  };
+}
+
 function stableWasmPaths() {
   return {
     mjs: new URL(ORT_JSEP_MJS, location.origin).href,
