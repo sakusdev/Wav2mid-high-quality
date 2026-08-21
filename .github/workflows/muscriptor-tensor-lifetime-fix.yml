@@ -1,0 +1,200 @@
+name: MuScriptor tensor lifetime fix
+
+on:
+  push:
+    branches: [feat/muscriptor-browser-webgpu]
+    paths:
+      - .github/workflows/muscriptor-tensor-lifetime-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feat/muscriptor-browser-webgpu
+      - name: Patch owned ONNX tensor lifetimes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/muscriptor-browser-core.js')
+          text = path.read_text()
+
+          old_condition = '''  async condition(mel, instrumentIds) {
+            const logMel = new ort.Tensor('float32', mel.data, mel.dims);
+            const ids = new ort.Tensor('int64', BigInt64Array.from(instrumentIds, BigInt), [1, instrumentIds.length]);
+            const outputs = await this.conditioner.run({ log_mel: logMel, instrument_embed_ids: ids });
+            return outputs.prefix_embeddings;
+          }
+          '''
+          new_condition = '''  async condition(mel, instrumentIds) {
+            const logMel = new ort.Tensor('float32', mel.data, mel.dims);
+            const ids = new ort.Tensor('int64', BigInt64Array.from(instrumentIds, BigInt), [1, instrumentIds.length]);
+            try {
+              const outputs = await this.conditioner.run({ log_mel: logMel, instrument_embed_ids: ids });
+              return outputs.prefix_embeddings;
+            } finally {
+              logMel.dispose?.();
+              ids.dispose?.();
+            }
+          }
+          '''
+
+          old_generate = '''  async generateChunk(prefix, prompt, forbidden, tracker, openEvents, notes, drums) {
+            const caches = this.createCaches();
+            try {
+              const firstTokens = BigInt64Array.from([MUSCRIPTOR_INITIAL_TOKEN, ...prompt], BigInt);
+              let pastLen = 0;
+              let step = await this.runDecoder(prefix, firstTokens, pastLen, caches);
+              pastLen += prefix.dims[1] + firstTokens.length;
+              prefix.dispose?.();
+
+              for (let generated = 0; generated < MUSCRIPTOR_MAX_GENERATION; generated += 1) {
+                const token = argmax(step.logits.data, forbidden);
+                await this.appendNewKv(step, caches, pastLen - step.queryLength);
+                step.dispose();
+                if (token === MUSCRIPTOR_EOS) return;
+                consumeActions(tracker.feed(token), openEvents, notes, drums);
+                const emptyData = this.decoderActivationType === 'float32'
+                  ? new Float32Array(0)
+                  : new Uint16Array(0);
+                const emptyPrefix = new ort.Tensor(
+                  this.decoderActivationType,
+                  emptyData,
+                  [1, 0, this.manifest.architecture.dim],
+                );
+                step = await this.runDecoder(emptyPrefix, BigInt64Array.of(BigInt(token)), pastLen, caches);
+                pastLen += 1;
+                if (pastLen >= this.maxCache - 1) throw new Error('MuScriptor KV cache limit reached before EOS.');
+              }
+              throw new Error(`MuScriptor chunk did not emit EOS within ${MUSCRIPTOR_MAX_GENERATION} tokens.`);
+            } finally {
+              for (const cache of caches) {
+                cache.tensor.dispose?.();
+                cache.buffer.destroy();
+              }
+            }
+          }
+          '''
+          new_generate = '''  async generateChunk(prefix, prompt, forbidden, tracker, openEvents, notes, drums) {
+            const caches = this.createCaches();
+            let step = null;
+            try {
+              const firstTokens = BigInt64Array.from([MUSCRIPTOR_INITIAL_TOKEN, ...prompt], BigInt);
+              const prefixLength = prefix.dims[1];
+              let pastLen = 0;
+              try {
+                step = await this.runDecoder(prefix, firstTokens, pastLen, caches);
+              } finally {
+                prefix.dispose?.();
+              }
+              pastLen += prefixLength + firstTokens.length;
+
+              for (let generated = 0; generated < MUSCRIPTOR_MAX_GENERATION; generated += 1) {
+                let token;
+                try {
+                  token = argmax(step.logits.data, forbidden);
+                  await this.appendNewKv(step, caches, pastLen - step.queryLength);
+                } finally {
+                  step.dispose();
+                  step = null;
+                }
+                if (token === MUSCRIPTOR_EOS) return;
+                consumeActions(tracker.feed(token), openEvents, notes, drums);
+                const emptyData = this.decoderActivationType === 'float32'
+                  ? new Float32Array(0)
+                  : new Uint16Array(0);
+                const emptyPrefix = new ort.Tensor(
+                  this.decoderActivationType,
+                  emptyData,
+                  [1, 0, this.manifest.architecture.dim],
+                );
+                try {
+                  step = await this.runDecoder(emptyPrefix, BigInt64Array.of(BigInt(token)), pastLen, caches);
+                } finally {
+                  emptyPrefix.dispose?.();
+                }
+                pastLen += 1;
+                if (pastLen >= this.maxCache - 1) throw new Error('MuScriptor KV cache limit reached before EOS.');
+              }
+              throw new Error(`MuScriptor chunk did not emit EOS within ${MUSCRIPTOR_MAX_GENERATION} tokens.`);
+            } finally {
+              step?.dispose();
+              for (const cache of caches) {
+                cache.tensor.dispose?.();
+                cache.buffer.destroy();
+              }
+            }
+          }
+          '''
+
+          old_run = '''  async runDecoder(prefix, tokenData, pastLen, caches) {
+            const tokenIds = tokenData instanceof BigInt64Array ? tokenData : BigInt64Array.from(tokenData, BigInt);
+            const feeds = {
+              prefix_embeddings: prefix,
+              token_ids: new ort.Tensor('int64', tokenIds, [1, tokenIds.length]),
+              past_len: new ort.Tensor('int64', BigInt64Array.of(BigInt(pastLen)), []),
+            };
+            for (let i = 0; i < this.layers; i += 1) {
+              feeds[`cache_k_${i}`] = caches[i * 2].tensor;
+              feeds[`cache_v_${i}`] = caches[i * 2 + 1].tensor;
+            }
+            const outputs = await this.decoder.run(feeds);
+            const queryLength = outputs.new_k_0?.dims?.[1] ?? tokenIds.length;
+            return new DecoderStep(outputs, this.layers, queryLength);
+          }
+          '''
+          new_run = '''  async runDecoder(prefix, tokenData, pastLen, caches) {
+            const tokenIds = tokenData instanceof BigInt64Array ? tokenData : BigInt64Array.from(tokenData, BigInt);
+            const tokenIdsTensor = new ort.Tensor('int64', tokenIds, [1, tokenIds.length]);
+            const pastLenTensor = new ort.Tensor('int64', BigInt64Array.of(BigInt(pastLen)), []);
+            const feeds = {
+              prefix_embeddings: prefix,
+              token_ids: tokenIdsTensor,
+              past_len: pastLenTensor,
+            };
+            for (let i = 0; i < this.layers; i += 1) {
+              feeds[`cache_k_${i}`] = caches[i * 2].tensor;
+              feeds[`cache_v_${i}`] = caches[i * 2 + 1].tensor;
+            }
+            try {
+              const outputs = await this.decoder.run(feeds);
+              const queryLength = outputs.new_k_0?.dims?.[1] ?? tokenIds.length;
+              return new DecoderStep(outputs, this.layers, queryLength);
+            } finally {
+              tokenIdsTensor.dispose?.();
+              pastLenTensor.dispose?.();
+            }
+          }
+          '''
+
+          replacements = [
+              ('condition', old_condition, new_condition),
+              ('generateChunk', old_generate, new_generate),
+              ('runDecoder', old_run, new_run),
+          ]
+          for name, old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{name}: expected exactly one source match, got {count}')
+              text = text.replace(old, new)
+
+          path.write_text(text)
+          PY
+
+          node --check src/muscriptor-browser-core.js
+          git diff --check
+          git diff -- src/muscriptor-browser-core.js
+      - name: Commit lifetime fix
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/muscriptor-browser-core.js
+          git commit -m 'dispose MuScriptor transient ONNX tensors'
+          git push origin HEAD:feat/muscriptor-browser-webgpu
