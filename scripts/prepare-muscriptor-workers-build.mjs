@@ -1,9 +1,10 @@
-import { access, rm } from 'node:fs/promises';
+import { access, readFile, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-const root = resolve(new URL('..', import.meta.url).pathname);
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const modelManifest = resolve(root, 'public/models/muscriptor-small/manifest.json');
 const sourceDir = resolve(root, '.muscriptor-source');
 const browserDir = resolve(root, '.muscriptor-browser');
@@ -40,11 +41,12 @@ await rm(browserDir, { recursive: true, force: true });
 await rm(stagedDir, { recursive: true, force: true });
 
 run('python', ['tools/fetch_muscriptor_weights.py']);
+const source = (await readFile(resolve(sourceDir, 'SOURCE.txt'), 'utf8')).trim();
 run('python', [
   'tools/export_muscriptor_browser_v3.py',
   '--weights', '.muscriptor-source/model.safetensors',
   '--output', '.muscriptor-browser',
-  '--source-file', '.muscriptor-source/SOURCE.txt',
+  '--source', source,
 ]);
 run('python', [
   'tools/stage_muscriptor_cloudflare.py',
